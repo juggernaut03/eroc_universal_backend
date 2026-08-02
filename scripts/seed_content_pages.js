@@ -19,7 +19,10 @@ const buildDefaultPages = (clientName) => [
     html: `<h2>Privacy Policy</h2><p>${clientName} collects only the information needed to process your orders: your mobile number, delivery addresses, and order history. We never sell your personal data to third parties. Payment processing is handled securely by Razorpay; we do not store card details. For any privacy questions or data deletion requests, contact us through the Support section of the app.</p>`,
   },
   {
-    slug: 'terms',
+    // 'terms-conditions', not 'terms': this is the slug the shipped mobile app
+    // requests (support_content_providers.dart). Seeding 'terms' left the
+    // Terms tab 404ing whatever an admin typed into it.
+    slug: 'terms-conditions',
     title: 'Terms & Conditions',
     html: `<h2>Terms &amp; Conditions</h2><p>By using the ${clientName} app you agree to provide accurate delivery information and to pay for orders placed through your account. Prices and product availability are confirmed at checkout and may vary by store. Orders can be cancelled from the Orders screen while they are still being confirmed.</p>`,
   },
@@ -27,6 +30,11 @@ const buildDefaultPages = (clientName) => [
     slug: 'refund-policy',
     title: 'Refund Policy',
     html: `<h2>Refund Policy</h2><p>If an item arrives damaged, expired, or is missing from your order, contact support within 48 hours of delivery and we will refund or replace it. Refunds for online payments are returned to the original payment method within 5–7 working days.</p>`,
+  },
+  {
+    slug: 'help-support',
+    title: 'Help & Support',
+    html: `<h2>Help &amp; Support</h2><p>Most questions are answered in the FAQ. If you still need us:</p><ul><li><strong>Order problems</strong> — open the order in the Orders screen and use Contact Support.</li><li><strong>Damaged or missing items</strong> — tell us within 48 hours of delivery and we will refund or replace them.</li><li><strong>Payment queries</strong> — online payments settle within 5–7 working days; have your order number ready.</li></ul><p>Store contact details are shown below.</p>`,
   },
   {
     slug: 'faq',

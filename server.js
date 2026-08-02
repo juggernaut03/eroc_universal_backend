@@ -77,6 +77,7 @@ const notificationRoutes = require('./routes/notifications');
 const offerRoutes = require('./routes/offers');
 const projectConfigRoutes = require('./routes/project-config');
 const contentRoutes = require('./routes/content');
+const faqRoutes = require('./routes/faqs');
 const projectsRoutes = require('./routes/projects');
 const digitalCartRoutes = require('./routes/digital-cart');
 const onboardingRoutes = require('./routes/onboarding');
@@ -279,6 +280,7 @@ app.use('/api', tenantResolver);
 // API routes
 app.use('/api/project-config', projectConfigRoutes);
 app.use('/api/content', contentRoutes);
+app.use('/api/faqs', faqRoutes);
 app.use('/api/projects', projectsRoutes);
 // Tight per-account limits on the endpoints that accept a secret. Registered
 // before the /api/auth mount so they run first; express.json() has already
