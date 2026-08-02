@@ -2,6 +2,21 @@ const express = require('express');
 const router = express.Router();
 const ProductMaster = require('../models/ProductMaster');
 
+// Values that mean "every subcategory in this category" rather than naming one.
+//
+// "0" is the sentinel the mobile app's ALL tab has always sent; "all" and the
+// empty string are accepted so a caller does not have to know that history.
+const ALL_SUBCATEGORIES = new Set(['', '0', 'all', 'ALL']);
+
+/// Returns the subcategory to filter on, or null for "do not filter".
+const normaliseSubCategoryId = (value) => {
+  if (value === undefined || value === null) return null;
+  const trimmed = String(value).trim();
+  return ALL_SUBCATEGORIES.has(trimmed) || ALL_SUBCATEGORIES.has(trimmed.toLowerCase())
+    ? null
+    : trimmed;
+};
+
 /**
  * @route   POST /api/products/productdetails
  * @desc    Get a specific product by store_code and p_code
@@ -331,30 +346,41 @@ router.post('/get-products', async (req, res, next) => {
       });
     }
     
-    if (!sub_category_id) {
-      return res.status(400).json({
-        success: false,
-        error: 'sub_category_id is required'
-      });
-    }
-    
+    // sub_category_id is OPTIONAL: leaving it out — or sending the "all"
+    // sentinel — returns every product in the category.
+    //
+    // It used to be mandatory, and the app's "ALL" tab sends the string "0" to
+    // mean "no subcategory filter". "0" is truthy, so it passed this check and
+    // was then used as a literal subcategory id, matching nothing: the ALL tab
+    // showed "0 Products — Try selecting a different subcategory" on categories
+    // that were full of stock.
+    //
+    // Normalising here rather than only in the app means every build already
+    // installed gets a working ALL tab as soon as this deploys.
+    const subCategoryFilter = normaliseSubCategoryId(sub_category_id);
+
     // Find products using the filters
     const products = await ProductMaster.findByFilters({
       store_code: store_code.trim(),
       dept_id: dept_id,
       category_id: category_id,
-      sub_category_id: sub_category_id
+      // null here means findByFilters leaves subcategory out of the query.
+      sub_category_id: subCategoryFilter
     });
-    
+
+    const scopeLabel = subCategoryFilter
+      ? `sub_category_id: ${subCategoryFilter}`
+      : 'all subcategories';
+
     if (!products || products.length === 0) {
       return res.status(200).json({
         success: true,
         count: 0,
-        message: `No products found for store_code: ${store_code.trim()}, dept_id: ${dept_id}, category_id: ${category_id}, and sub_category_id: ${sub_category_id}`,
+        message: `No products found for store_code: ${store_code.trim()}, dept_id: ${dept_id}, category_id: ${category_id}, and ${scopeLabel}`,
         store_code: store_code.trim(),
         dept_id: dept_id,
         category_id: category_id,
-        sub_category_id: sub_category_id,
+        sub_category_id: subCategoryFilter,
         data: []
       });
     }
@@ -384,11 +410,12 @@ router.post('/get-products', async (req, res, next) => {
     res.status(200).json({
       success: true,
       count: productsData.length,
-      message: `Found ${productsData.length} product(s) for store_code: ${store_code.trim()}, dept_id: ${dept_id}, category_id: ${category_id}, and sub_category_id: ${sub_category_id}`,
+      message: `Found ${productsData.length} product(s) for store_code: ${store_code.trim()}, dept_id: ${dept_id}, category_id: ${category_id}, and ${scopeLabel}`,
       store_code: store_code.trim(),
       dept_id: dept_id,
       category_id: category_id,
-      sub_category_id: sub_category_id,
+      // What was actually filtered on: null when every subcategory is included.
+      sub_category_id: subCategoryFilter,
       data: productsData
     });
   } catch (error) {
