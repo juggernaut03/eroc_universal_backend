@@ -135,6 +135,7 @@ const repriceCart = async (cart) => {
     items.push({
       ...base,
       product_name: product.product_name,
+      mrp: toNumber(product.product_mrp) || undefined,
       unit_price: unitPrice,
       total_price: round2(unitPrice * cartItem.quantity),
     });

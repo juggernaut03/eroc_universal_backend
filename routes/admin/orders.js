@@ -13,6 +13,7 @@ const {
   normalizeStatus,
   buildStatusQuery
 } = require('../../constants/orderStatus');
+const { adminActor, buildTimeline, buildHistoryEntry } = require('../../utils/orderStatusHistory');
 
 // @route   GET /api/admin/orders
 // @desc    Get all orders with filtering and pagination
@@ -136,12 +137,52 @@ router.get('/:id', checkPermission('orders', 'view'), async (req, res) => {
   }
 });
 
+// @route   GET /api/admin/orders/:id/history
+// @desc    Status change timeline for one order. Orders placed before
+//          status_history existed get a timeline derived from their
+//          timestamps, with those entries marked `derived`.
+// @access  Admin
+router.get('/:id/history', checkPermission('orders', 'view'), async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id)
+      .select('order_number order_status status_history order_placed_at order_confirmed_at order_completed_at actual_delivery_date cancelled_at cancel_reason last_updated_at createdAt updatedAt')
+      .lean();
+
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: 'Order not found'
+      });
+    }
+
+    const timeline = buildTimeline(order);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        order_number: order.order_number,
+        current_status: normalizeStatus(order.order_status),
+        // True when nothing was recorded and the timeline had to be inferred.
+        derived: timeline.length > 0 && timeline.every((entry) => entry.derived),
+        timeline
+      }
+    });
+  } catch (error) {
+    console.error('Get order history error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching order history',
+      error: error.message
+    });
+  }
+});
+
 // @route   PATCH /api/admin/orders/:id/status
 // @desc    Update order status
 // @access  Admin
 router.patch('/:id/status', checkPermission('orders', 'edit'), async (req, res) => {
   try {
-    const { status } = req.body;
+    const { status, note } = req.body;
 
     if (!status || !isValidStatus(status)) {
       return res.status(400).json({
@@ -159,8 +200,9 @@ router.patch('/:id/status', checkPermission('orders', 'edit'), async (req, res) 
       });
     }
 
-    // Use the instance method to update status
-    await order.updateStatus(status);
+    // Use the instance method to update status. Passing the admin through
+    // records who made the change on the order's timeline.
+    await order.updateStatus(status, adminActor(req.user), note);
 
     // Create in-app notification for the user (API-based, no Firebase)
     if (order.mobile_no) {
@@ -256,8 +298,19 @@ router.patch('/:id/payment-status', checkPermission('orders', 'edit'), async (re
 // @access  Admin
 router.put('/:id', checkPermission('orders', 'edit'), async (req, res) => {
   try {
+    // A status change coming through here would bypass the timeline, so it is
+    // held back and applied separately below via updateStatus().
+    const { order_status: requestedStatus, status_history, ...rest } = req.body;
+
+    if (requestedStatus && !isValidStatus(normalizeStatus(requestedStatus))) {
+      return res.status(400).json({
+        success: false,
+        message: `Invalid status. Must be one of: ${ORDER_STATUSES.join(', ')}`
+      });
+    }
+
     const updateData = {
-      ...req.body,
+      ...rest,
       last_updated_at: new Date()
     };
 
@@ -272,6 +325,10 @@ router.put('/:id', checkPermission('orders', 'edit'), async (req, res) => {
         success: false,
         message: 'Order not found'
       });
+    }
+
+    if (requestedStatus && normalizeStatus(requestedStatus) !== normalizeStatus(order.order_status)) {
+      await order.updateStatus(requestedStatus, adminActor(req.user));
     }
 
     res.status(200).json({
@@ -556,13 +613,35 @@ router.post('/bulk-update-status', checkPermission('orders', 'edit'), async (req
       });
     }
 
-    const result = await Order.updateMany(
-      { _id: { $in: orderIds } },
-      {
-        order_status: status,
-        last_updated_at: new Date()
+    // Done as one bulkWrite rather than updateMany so each order can record
+    // its own from_status on the timeline — updateMany has no way to reference
+    // the value it is replacing.
+    const targets = await Order.find({ _id: { $in: orderIds } })
+      .select('_id order_status')
+      .lean();
+
+    const actor = adminActor(req.user);
+    const changedAt = new Date();
+    const operations = targets.map((target) => ({
+      updateOne: {
+        filter: { _id: target._id },
+        update: {
+          $set: { order_status: status, last_updated_at: changedAt },
+          $push: {
+            status_history: buildHistoryEntry(status, {
+              from: target.order_status,
+              actor,
+              at: changedAt,
+              note: 'Bulk status update'
+            })
+          }
+        }
       }
-    );
+    }));
+
+    const result = operations.length
+      ? await Order.bulkWrite(operations)
+      : { matchedCount: 0, modifiedCount: 0 };
 
     res.status(200).json({
       success: true,

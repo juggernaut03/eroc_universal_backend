@@ -253,12 +253,19 @@ router.post('/:orderNumber/cancel', protect, async (req, res, next) => {
       });
     }
 
+    const previousStatus = order.order_status;
     order.order_status = 'cancelled';
     order.cancelled_at = new Date();
     order.last_updated_at = new Date();
     if (cancel_reason && String(cancel_reason).trim()) {
       order.cancel_reason = String(cancel_reason).trim();
     }
+    order.recordStatusChange('cancelled', {
+      from: previousStatus,
+      at: order.cancelled_at,
+      actor: { id: req.user._id, name: req.user.name, role: 'customer' },
+      note: order.cancel_reason
+    });
     await order.save();
 
     res.status(200).json({

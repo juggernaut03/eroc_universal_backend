@@ -6,6 +6,7 @@ const {
   normalizeStatus,
   buildStatusQuery,
 } = require('../constants/orderStatus');
+const { buildHistoryEntry, deriveTimeline } = require('../utils/orderStatusHistory');
 
 const orderItemSchema = new mongoose.Schema({
   p_code: {
@@ -31,6 +32,13 @@ const orderItemSchema = new mongoose.Schema({
     required: [true, 'Total price is required'],
     min: [0, 'Total price cannot be negative']
   },
+  // Catalogue MRP at the time the order was placed, captured so the pick list
+  // can show list price vs. what was charged. Absent on orders placed before
+  // this was recorded — the panel falls back to showing no discount.
+  mrp: {
+    type: Number,
+    min: [0, 'MRP cannot be negative']
+  },
   package_size: {
     type: Number,
     trim: true
@@ -46,6 +54,45 @@ const orderItemSchema = new mongoose.Schema({
   pcode_img: {
     type: String,
     trim: true
+  }
+}, { _id: false });
+
+// One row of the order's status timeline. Appended on every status change;
+// see utils/orderStatusHistory.js for how entries are built and how orders
+// that predate this field get a timeline reconstructed from their timestamps.
+const statusHistorySchema = new mongoose.Schema({
+  status: {
+    type: String,
+    required: true
+  },
+  from_status: {
+    type: String
+  },
+  changed_at: {
+    type: Date,
+    required: true,
+    default: Date.now
+  },
+  changed_by_role: {
+    type: String,
+    enum: ['admin', 'customer', 'system'],
+    default: 'system'
+  },
+  changed_by_id: {
+    type: String
+  },
+  changed_by_name: {
+    type: String
+  },
+  note: {
+    type: String,
+    trim: true
+  },
+  // Set on entries reconstructed from the order's timestamps rather than
+  // recorded when the change happened. Persisted so an order that gets its
+  // first real change keeps an honest record of which timings were inferred.
+  derived: {
+    type: Boolean
   }
 }, { _id: false });
 
@@ -265,6 +312,10 @@ const orderSchema = new mongoose.Schema({
   last_updated_at: {
     type: Date,
     default: Date.now
+  },
+  status_history: {
+    type: [statusHistorySchema],
+    default: undefined
   }
 }, {
   timestamps: true,
@@ -309,6 +360,38 @@ orderSchema.statics.findByMobile = function(mobileNo, limit = 50) {
     .limit(limit);
 };
 
+// Append an entry to the status timeline.
+//
+// The first change on an order placed before status_history existed would
+// otherwise replace a timeline derived from its timestamps with a single
+// entry, hiding everything that came before. So on first use the derived
+// entries are written out first and the new change appended after them.
+orderSchema.methods.recordStatusChange = function(status, options = {}) {
+  if (!this.status_history?.length) {
+    this.status_history = deriveTimeline(this);
+  }
+  const entry = buildHistoryEntry(status, options);
+  this.status_history.push(entry);
+  return entry;
+};
+
+// Seed the timeline with the status the order was created in, so every order
+// placed from here on has a first entry regardless of which code path made it.
+orderSchema.pre('save', function(next) {
+  if (this.isNew && !this.status_history?.length) {
+    // Set directly rather than through recordStatusChange: a brand new order
+    // has nothing to derive from, and deriving would duplicate this entry.
+    this.status_history = [
+      buildHistoryEntry(this.order_status, {
+        at: this.order_placed_at,
+        actor: { role: 'customer' },
+        note: 'Order placed'
+      })
+    ];
+  }
+  next();
+});
+
 // Static method to find orders by status
 orderSchema.statics.findByStatus = function(status, limit = 100) {
   return this.find(buildStatusQuery(normalizeStatus(status)))
@@ -316,11 +399,16 @@ orderSchema.statics.findByStatus = function(status, limit = 100) {
     .limit(limit);
 };
 
-// Instance method to update order status
-orderSchema.methods.updateStatus = function(newStatus) {
+// Instance method to update order status.
+//
+// `actor` is optional and shaped { id, name, role }; pass adminActor(req.user)
+// from admin routes so the timeline records who made the change.
+orderSchema.methods.updateStatus = function(newStatus, actor, note) {
   const status = LEGACY_STATUS_MAP[newStatus] || newStatus;
+  const previousStatus = this.order_status;
   this.order_status = status;
   this.last_updated_at = new Date();
+  this.recordStatusChange(status, { from: previousStatus, actor, note });
 
   // Set timestamps based on status
   switch (status) {
