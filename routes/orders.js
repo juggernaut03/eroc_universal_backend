@@ -5,6 +5,7 @@ const AdminNotification = require('../models/AdminNotification');
 const { protect } = require('../middleware/auth');
 const { placeOrder } = require('../utils/orderService');
 const { createOrderPlacedNotification } = require('../utils/notificationService');
+const { CANCELLABLE_STATUSES } = require('../constants/orderStatus');
 
 /**
  * @route   POST /api/orders/place-order
@@ -245,7 +246,6 @@ router.post('/:orderNumber/cancel', protect, async (req, res, next) => {
       });
     }
 
-    const CANCELLABLE_STATUSES = ['placed', 'confirmed'];
     if (!CANCELLABLE_STATUSES.includes(order.order_status)) {
       return res.status(400).json({
         success: false,

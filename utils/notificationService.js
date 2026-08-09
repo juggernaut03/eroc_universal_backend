@@ -4,6 +4,7 @@
  */
 
 const Notification = require('../models/Notification');
+const { normalizeStatus } = require('../constants/orderStatus');
 
 /**
  * Create notification when user places an order
@@ -39,29 +40,34 @@ const createOrderPlacedNotification = async (userId, orderNumber, totalAmount) =
  */
 const createOrderStatusNotification = async (userId, orderNumber, newStatus) => {
     try {
-        // Map status to user-friendly messages
+        // Map status to user-friendly messages. Keyed by the current status
+        // vocabulary; legacy values are folded first so pre-rename callers
+        // still get the right copy.
         const statusMessages = {
-            'confirmed': 'Your order has been confirmed! We are preparing it.',
-            'processing': 'Your order is being processed.',
-            'packed': 'Your order has been packed and is ready for dispatch!',
-            'shipped': 'Your order is on its way! 🚚',
+            'pending': 'Your order has been placed and is awaiting confirmation.',
+            'accepted': 'Your order has been accepted! We are preparing it.',
+            'accepted_by_store': 'The store has accepted your order.',
+            'in_packaging': 'Your order is being packed and will be dispatched soon!',
+            'out_for_delivery': 'Your order is on its way! 🚚',
             'delivered': 'Your order has been delivered! Thank you for shopping with us. 🎉',
-            'cancelled': 'Your order has been cancelled.',
-            'refunded': 'Your order refund has been processed.'
+            'payment_processing': 'We are confirming your payment.',
+            'cancelled': 'Your order has been cancelled.'
         };
 
         const statusEmojis = {
-            'confirmed': '✅',
-            'processing': '⏳',
-            'packed': '📦',
-            'shipped': '🚚',
+            'pending': '🕒',
+            'accepted': '✅',
+            'accepted_by_store': '🏬',
+            'in_packaging': '📦',
+            'out_for_delivery': '🚚',
             'delivered': '🎉',
-            'cancelled': '❌',
-            'refunded': '💰'
+            'payment_processing': '💳',
+            'cancelled': '❌'
         };
 
-        const emoji = statusEmojis[newStatus] || '📋';
-        const message = statusMessages[newStatus] || `Order status updated to ${newStatus}.`;
+        const status = normalizeStatus(newStatus);
+        const emoji = statusEmojis[status] || '📋';
+        const message = statusMessages[status] || `Order status updated to ${status}.`;
 
         await Notification.create({
             user: userId,
@@ -70,11 +76,11 @@ const createOrderStatusNotification = async (userId, orderNumber, newStatus) => 
             type: 'order',
             data: {
                 orderNumber,
-                status: newStatus,
+                status,
                 action: 'order_status_updated'
             }
         });
-        console.log(`📦 Notification created: Order status updated #${orderNumber} -> ${newStatus}`);
+        console.log(`📦 Notification created: Order status updated #${orderNumber} -> ${status}`);
     } catch (error) {
         console.error('Error creating order status notification:', error);
     }

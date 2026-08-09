@@ -1,4 +1,11 @@
 const mongoose = require('mongoose');
+const {
+  ORDER_STATUS,
+  ORDER_STATUSES,
+  LEGACY_STATUS_MAP,
+  normalizeStatus,
+  buildStatusQuery,
+} = require('../constants/orderStatus');
 
 const orderItemSchema = new mongoose.Schema({
   p_code: {
@@ -157,8 +164,11 @@ const orderSchema = new mongoose.Schema({
   },
   order_status: {
     type: String,
-    enum: ['placed', 'confirmed', 'processing', 'packed', 'shipped', 'delivered', 'cancelled', 'refunded'],
-    default: 'placed'
+    // Legacy spellings are accepted on write so documents saved before the
+    // rename still validate; the setter folds them to the current value.
+    enum: [...ORDER_STATUSES, ...Object.keys(LEGACY_STATUS_MAP)],
+    set: (value) => LEGACY_STATUS_MAP[value] || value,
+    default: ORDER_STATUS.PENDING
   },
   order_items: [orderItemSchema],
   delivery_info: deliveryInfoSchema,
@@ -301,19 +311,20 @@ orderSchema.statics.findByMobile = function(mobileNo, limit = 50) {
 
 // Static method to find orders by status
 orderSchema.statics.findByStatus = function(status, limit = 100) {
-  return this.find({ order_status: status })
+  return this.find(buildStatusQuery(normalizeStatus(status)))
     .sort({ order_placed_at: -1 })
     .limit(limit);
 };
 
 // Instance method to update order status
 orderSchema.methods.updateStatus = function(newStatus) {
-  this.order_status = newStatus;
+  const status = LEGACY_STATUS_MAP[newStatus] || newStatus;
+  this.order_status = status;
   this.last_updated_at = new Date();
 
   // Set timestamps based on status
-  switch (newStatus) {
-    case 'confirmed':
+  switch (status) {
+    case ORDER_STATUS.ACCEPTED:
       if (!this.order_confirmed_at) {
         this.order_confirmed_at = new Date();
       }

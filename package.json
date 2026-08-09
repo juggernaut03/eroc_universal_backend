@@ -15,6 +15,7 @@
     "create-admin": "node scripts/create_admin_users.js",
     "set-admin-passwords": "node scripts/set_admin_passwords.js",
     "migrate-permissions": "node scripts/migrate_admin_permissions.js",
+    "migrate-order-statuses": "node scripts/migrate_order_statuses.js",
     "update-postman": "node scripts/update-postman.js"
   },
   "keywords": [

@@ -207,7 +207,7 @@ const options = {
                         },
                         order_status: {
                             type: 'string',
-                            enum: ['pending', 'confirmed', 'processing', 'shipped', 'delivered', 'cancelled'],
+                            enum: ['pending', 'accepted', 'accepted_by_store', 'in_packaging', 'out_for_delivery', 'delivered', 'payment_processing', 'cancelled'],
                             example: 'pending'
                         },
                         order_placed_at: {

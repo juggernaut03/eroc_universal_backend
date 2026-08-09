@@ -5,6 +5,11 @@ const Product = require('../../models/Product');
 const Order = require('../../models/Order');
 const Category = require('../../models/Category');
 const { checkPermission } = require('../../middleware/checkPermission');
+const {
+  ORDER_STATUS,
+  NON_REVENUE_STATUSES,
+  LEGACY_STATUS_ALIASES
+} = require('../../constants/orderStatus');
 
 // All dashboard routes require dashboard:view permission
 router.use(checkPermission('dashboard', 'view'));
@@ -59,13 +64,22 @@ router.get('/overview', async (req, res) => {
     });
 
     const pendingOrders = await Order.countDocuments({
-      order_status: { $in: ['placed', 'confirmed', 'processing'] }
+      order_status: {
+        $in: [
+          ...LEGACY_STATUS_ALIASES[ORDER_STATUS.PENDING],
+          ...LEGACY_STATUS_ALIASES[ORDER_STATUS.ACCEPTED],
+          ...LEGACY_STATUS_ALIASES[ORDER_STATUS.ACCEPTED_BY_STORE],
+          ORDER_STATUS.PAYMENT_PROCESSING
+        ]
+      }
     });
 
     const deliveredOrders = await Order.countDocuments({
       order_status: 'delivered'
     });
 
+    // 'refunded' was folded into 'cancelled' when the status vocabulary was
+    // aligned with the admin panel; only pre-rename documents still carry it.
     const refundedOrders = await Order.countDocuments({
       order_status: 'refunded'
     });
@@ -74,7 +88,7 @@ router.get('/overview', async (req, res) => {
     const revenueStats = await Order.aggregate([
       {
         $match: {
-          order_status: { $nin: ['cancelled', 'refunded'] }
+          order_status: { $nin: NON_REVENUE_STATUSES }
         }
       },
       {
@@ -90,7 +104,7 @@ router.get('/overview', async (req, res) => {
       {
         $match: {
           order_placed_at: { $gte: today },
-          order_status: { $nin: ['cancelled', 'refunded'] }
+          order_status: { $nin: NON_REVENUE_STATUSES }
         }
       },
       {
@@ -105,7 +119,7 @@ router.get('/overview', async (req, res) => {
       {
         $match: {
           order_placed_at: { $gte: thisMonth },
-          order_status: { $nin: ['cancelled', 'refunded'] }
+          order_status: { $nin: NON_REVENUE_STATUSES }
         }
       },
       {
@@ -120,7 +134,7 @@ router.get('/overview', async (req, res) => {
       {
         $match: {
           order_placed_at: { $gte: lastMonth, $lte: lastMonthEnd },
-          order_status: { $nin: ['cancelled', 'refunded'] }
+          order_status: { $nin: NON_REVENUE_STATUSES }
         }
       },
       {
@@ -204,7 +218,7 @@ router.get('/sales-trend', async (req, res) => {
       {
         $match: {
           order_placed_at: { $gte: startDate },
-          order_status: { $nin: ['cancelled', 'refunded'] }
+          order_status: { $nin: NON_REVENUE_STATUSES }
         }
       },
       {
@@ -244,7 +258,7 @@ router.get('/top-products', async (req, res) => {
     const topProducts = await Order.aggregate([
       {
         $match: {
-          order_status: { $nin: ['cancelled', 'refunded'] }
+          order_status: { $nin: NON_REVENUE_STATUSES }
         }
       },
       { $unwind: '$order_items' },

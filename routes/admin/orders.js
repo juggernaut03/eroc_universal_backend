@@ -4,6 +4,15 @@ const Order = require('../../models/Order');
 const User = require('../../models/User');
 const { createOrderStatusNotification, createPaymentStatusNotification } = require('../../utils/notificationService');
 const { checkPermission } = require('../../middleware/checkPermission');
+const {
+  ORDER_STATUS,
+  ORDER_STATUSES,
+  NON_REVENUE_STATUSES,
+  LEGACY_STATUS_ALIASES,
+  isValidStatus,
+  normalizeStatus,
+  buildStatusQuery
+} = require('../../constants/orderStatus');
 
 // @route   GET /api/admin/orders
 // @desc    Get all orders with filtering and pagination
@@ -22,27 +31,32 @@ router.get('/', checkPermission('orders', 'view'), async (req, res) => {
       sortOrder = 'desc'
     } = req.query;
 
-    // Build query
+    // Build query. Conditions go through $and because both the search filter
+    // and the Payment Processing status bucket need their own $or.
     const query = {};
+    const conditions = [];
 
     // Search by order number or mobile number
     if (search) {
-      query.$or = [
-        { order_number: { $regex: search, $options: 'i' } },
-        { mobile_no: { $regex: search, $options: 'i' } },
-        { 'customer_info.name': { $regex: search, $options: 'i' } },
-        { 'customer_info.email': { $regex: search, $options: 'i' } }
-      ];
+      conditions.push({
+        $or: [
+          { order_number: { $regex: search, $options: 'i' } },
+          { mobile_no: { $regex: search, $options: 'i' } },
+          { 'customer_info.name': { $regex: search, $options: 'i' } },
+          { 'customer_info.email': { $regex: search, $options: 'i' } }
+        ]
+      });
     }
 
-    // Filter by order status
+    // Filter by order status. Buckets are mutually exclusive — see
+    // constants/orderStatus.js for how Pending and Payment Processing split.
     if (status) {
-      query.order_status = status;
+      conditions.push(buildStatusQuery(normalizeStatus(status)));
     }
 
     // Filter by payment status
     if (paymentStatus) {
-      query['payment_info.payment_status'] = paymentStatus;
+      conditions.push({ 'payment_info.payment_status': paymentStatus });
     }
 
     // Filter by date range
@@ -54,6 +68,10 @@ router.get('/', checkPermission('orders', 'view'), async (req, res) => {
       if (endDate) {
         query.order_placed_at.$lte = new Date(endDate);
       }
+    }
+
+    if (conditions.length) {
+      query.$and = conditions;
     }
 
     // Build sort object
@@ -125,11 +143,10 @@ router.patch('/:id/status', checkPermission('orders', 'edit'), async (req, res) 
   try {
     const { status } = req.body;
 
-    const validStatuses = ['placed', 'confirmed', 'processing', 'packed', 'shipped', 'delivered', 'cancelled', 'refunded'];
-    if (!status || !validStatuses.includes(status)) {
+    if (!status || !isValidStatus(status)) {
       return res.status(400).json({
         success: false,
-        message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`
+        message: `Invalid status. Must be one of: ${ORDER_STATUSES.join(', ')}`
       });
     }
 
@@ -287,7 +304,11 @@ router.delete('/:id', checkPermission('orders', 'delete'), async (req, res) => {
     }
 
     // Only allow deletion if order is in placed or cancelled status
-    if (!['placed', 'cancelled'].includes(order.order_status)) {
+    const deletableStatuses = [
+      ...LEGACY_STATUS_ALIASES[ORDER_STATUS.PENDING],
+      ...LEGACY_STATUS_ALIASES[ORDER_STATUS.CANCELLED]
+    ];
+    if (!deletableStatuses.includes(order.order_status)) {
       return res.status(400).json({
         success: false,
         message: 'Cannot delete order that is being processed or completed'
@@ -305,6 +326,59 @@ router.delete('/:id', checkPermission('orders', 'delete'), async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error deleting order',
+      error: error.message
+    });
+  }
+});
+
+// @route   GET /api/admin/orders/stats/status-counts
+// @desc    Count orders in each admin status tab
+// @access  Admin
+// Counts honour the search and date filters but deliberately ignore the status
+// filter, so the tab badges stay stable while the admin switches between tabs.
+router.get('/stats/status-counts', checkPermission('orders', 'view'), async (req, res) => {
+  try {
+    const { search = '', startDate = '', endDate = '' } = req.query;
+
+    const baseQuery = {};
+
+    if (search) {
+      baseQuery.$or = [
+        { order_number: { $regex: search, $options: 'i' } },
+        { mobile_no: { $regex: search, $options: 'i' } },
+        { 'customer_info.name': { $regex: search, $options: 'i' } },
+        { 'customer_info.email': { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    if (startDate || endDate) {
+      baseQuery.order_placed_at = {};
+      if (startDate) baseQuery.order_placed_at.$gte = new Date(startDate);
+      if (endDate) baseQuery.order_placed_at.$lte = new Date(endDate);
+    }
+
+    const hasBaseFilters = Object.keys(baseQuery).length > 0;
+
+    const entries = await Promise.all(
+      ORDER_STATUSES.map(async (status) => {
+        const statusQuery = buildStatusQuery(status);
+        const query = hasBaseFilters ? { $and: [baseQuery, statusQuery] } : statusQuery;
+        return [status, await Order.countDocuments(query)];
+      })
+    );
+
+    const counts = Object.fromEntries(entries);
+    const total = await Order.countDocuments(baseQuery);
+
+    res.status(200).json({
+      success: true,
+      data: { total, counts }
+    });
+  } catch (error) {
+    console.error('Get order status counts error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching order status counts',
       error: error.message
     });
   }
@@ -341,7 +415,7 @@ router.get('/stats/overview', checkPermission('orders', 'view'), async (req, res
     const revenueStats = await Order.aggregate([
       {
         $match: {
-          order_status: { $nin: ['cancelled', 'refunded'] }
+          order_status: { $nin: NON_REVENUE_STATUSES }
         }
       },
       {
@@ -431,7 +505,7 @@ router.get('/stats/revenue', checkPermission('orders', 'view'), async (req, res)
             $gte: new Date(startDate),
             $lte: new Date(endDate)
           },
-          order_status: { $nin: ['cancelled', 'refunded'] }
+          order_status: { $nin: NON_REVENUE_STATUSES }
         }
       },
       {
@@ -475,11 +549,10 @@ router.post('/bulk-update-status', checkPermission('orders', 'edit'), async (req
       });
     }
 
-    const validStatuses = ['placed', 'confirmed', 'processing', 'packed', 'shipped', 'delivered', 'cancelled', 'refunded'];
-    if (!status || !validStatuses.includes(status)) {
+    if (!status || !isValidStatus(status)) {
       return res.status(400).json({
         success: false,
-        message: `Invalid status. Must be one of: ${validStatuses.join(', ')}`
+        message: `Invalid status. Must be one of: ${ORDER_STATUSES.join(', ')}`
       });
     }
 
