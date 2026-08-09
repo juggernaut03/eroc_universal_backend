@@ -14,6 +14,31 @@ const {
   buildStatusQuery
 } = require('../../constants/orderStatus');
 const { adminActor, buildTimeline, buildHistoryEntry } = require('../../utils/orderStatusHistory');
+const Store = require('../../models/Store');
+
+/**
+ * Attach the outlet name for each order's store_code.
+ *
+ * Orders only store the code, but the pick list is headed by the store's name,
+ * so it is resolved here in one query for the whole page rather than per row.
+ * Orders whose store has since been removed keep a name of undefined and the
+ * panel falls back to showing the code.
+ */
+const withStoreNames = async (orders) => {
+  const codes = [...new Set(orders.map((order) => order.store_code).filter(Boolean))];
+  if (codes.length === 0) return orders;
+
+  const stores = await Store.find({ store_code: { $in: codes } })
+    .select('store_code mobile_outlet_name')
+    .lean();
+
+  const nameByCode = new Map(stores.map((store) => [store.store_code, store.mobile_outlet_name]));
+
+  return orders.map((order) => ({
+    ...order,
+    store_name: nameByCode.get(order.store_code)
+  }));
+};
 
 // @route   GET /api/admin/orders
 // @desc    Get all orders with filtering and pagination
@@ -84,14 +109,15 @@ router.get('/', checkPermission('orders', 'view'), async (req, res) => {
     const orders = await Order.find(query)
       .sort(sort)
       .limit(parseInt(limit))
-      .skip(skip);
+      .skip(skip)
+      .lean();
 
     // Get total count for pagination
     const total = await Order.countDocuments(query);
 
     res.status(200).json({
       success: true,
-      data: orders,
+      data: await withStoreNames(orders),
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
@@ -114,7 +140,7 @@ router.get('/', checkPermission('orders', 'view'), async (req, res) => {
 // @access  Admin
 router.get('/:id', checkPermission('orders', 'view'), async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id);
+    const order = await Order.findById(req.params.id).lean();
 
     if (!order) {
       return res.status(404).json({
@@ -123,9 +149,11 @@ router.get('/:id', checkPermission('orders', 'view'), async (req, res) => {
       });
     }
 
+    const [withName] = await withStoreNames([order]);
+
     res.status(200).json({
       success: true,
-      data: order
+      data: withName
     });
   } catch (error) {
     console.error('Get order error:', error);
