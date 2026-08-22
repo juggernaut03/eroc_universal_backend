@@ -3,7 +3,23 @@ const router = express.Router();
 const User = require('../../models/User');
 const Order = require('../../models/Order');
 const Notification = require('../../models/Notification');
+const AddressBook = require('../../models/AddressBook');
+const Favorite = require('../../models/Favorite');
+const Product = require('../../models/Product');
 const { checkPermission } = require('../../middleware/checkPermission');
+const { ORDER_STATUS } = require('../../constants/orderStatus');
+
+// Statuses that mean an order is still "in flight" for a customer -
+// mirrors CANCELLABLE_STATUSES-adjacent buckets plus everything short of a
+// terminal state (delivered/cancelled).
+const ACTIVE_ORDER_STATUSES = [
+  ORDER_STATUS.PENDING,
+  ORDER_STATUS.ACCEPTED,
+  ORDER_STATUS.ACCEPTED_BY_STORE,
+  ORDER_STATUS.IN_PACKAGING,
+  ORDER_STATUS.OUT_FOR_DELIVERY,
+  ORDER_STATUS.PAYMENT_PROCESSING,
+];
 
 // @route   GET /api/admin/users
 // @desc    Get all users with pagination, search, and filters (with notification insights)
@@ -104,14 +120,17 @@ router.get('/', checkPermission('users', 'view'), async (req, res) => {
 });
 
 // @route   GET /api/admin/users/:id
-// @desc    Get single user by ID with detailed information
+// @desc    Get single user by ID with a full drill-down: order history,
+//          spend trend, addresses, favorites, and recent notifications.
 // @access  Admin
+//
+// The customer's own data isn't linked to User via ObjectId refs anywhere
+// except Notification - Order/AddressBook/Favorite all key off the plain
+// `mobile_no` / `mobile_number` string, so every join below matches on
+// user.mobile instead of user._id.
 router.get('/:id', checkPermission('users', 'view'), async (req, res) => {
   try {
-    const user = await User.findById(req.params.id)
-      .select('-otp -otpExpiresAt')
-      .populate('addresses')
-      .populate('favorites');
+    const user = await User.findById(req.params.id).select('-otp -otpExpiresAt').lean();
 
     if (!user) {
       return res.status(404).json({
@@ -120,34 +139,117 @@ router.get('/:id', checkPermission('users', 'view'), async (req, res) => {
       });
     }
 
-    // Get user's order statistics
-    const orderStats = await Order.aggregate([
-      { $match: { user: user._id } },
-      {
-        $group: {
-          _id: null,
-          totalOrders: { $sum: 1 },
-          totalSpent: { $sum: '$totalAmount' },
-          completedOrders: {
-            $sum: { $cond: [{ $eq: ['$status', 'delivered'] }, 1, 0] }
-          },
-          cancelledOrders: {
-            $sum: { $cond: [{ $eq: ['$status', 'cancelled'] }, 1, 0] }
+    const mobile = user.mobile;
+
+    const [orderStatsAgg, recentOrders, spendTrendAgg, addresses, favorites, notifications, notifStatsAgg] =
+      await Promise.all([
+        Order.aggregate([
+          { $match: { mobile_no: mobile } },
+          {
+            $group: {
+              _id: null,
+              totalOrders: { $sum: 1 },
+              totalSpent: { $sum: '$order_summary.total_amount' },
+              completedOrders: {
+                $sum: { $cond: [{ $eq: ['$order_status', ORDER_STATUS.DELIVERED] }, 1, 0] }
+              },
+              cancelledOrders: {
+                $sum: { $cond: [{ $eq: ['$order_status', ORDER_STATUS.CANCELLED] }, 1, 0] }
+              },
+              lastOrderAt: { $max: '$order_placed_at' }
+            }
           }
-        }
-      }
-    ]);
+        ]),
+        Order.find({ mobile_no: mobile })
+          .select(
+            'order_number order_status order_placed_at store_code order_summary.total_amount order_summary.total_items order_summary.total_quantity'
+          )
+          .sort({ order_placed_at: -1 })
+          .limit(50)
+          .lean(),
+        // Spend trend: last 12 months, grouped by calendar month.
+        Order.aggregate([
+          {
+            $match: {
+              mobile_no: mobile,
+              order_placed_at: { $gte: new Date(new Date().setMonth(new Date().getMonth() - 11, 1)) }
+            }
+          },
+          {
+            $group: {
+              _id: { $dateToString: { format: '%Y-%m', date: '$order_placed_at' } },
+              totalSpent: { $sum: '$order_summary.total_amount' },
+              orderCount: { $sum: 1 }
+            }
+          },
+          { $sort: { _id: 1 } }
+        ]),
+        AddressBook.find({ mobile_number: mobile }).sort({ is_default: -1, idaddress_book: 1 }).lean(),
+        Favorite.find({ mobile_no: mobile }).sort({ createdAt: -1 }).lean(),
+        Notification.find({ user: user._id }).sort({ createdAt: -1 }).limit(20).lean(),
+        Notification.aggregate([
+          { $match: { user: user._id } },
+          {
+            $group: {
+              _id: null,
+              totalCount: { $sum: 1 },
+              unreadCount: { $sum: { $cond: [{ $eq: ['$isRead', false] }, 1, 0] } }
+            }
+          }
+        ])
+      ]);
+
+    // Enrich favorites with product name/image/price - Favorite only stores
+    // p_code, not a Product ref.
+    let enrichedFavorites = favorites;
+    if (favorites.length) {
+      const productCodes = [...new Set(favorites.map((f) => f.p_code))];
+      const products = await Product.find({ productCode: { $in: productCodes } })
+        .select('productCode name images price')
+        .lean();
+      const productMap = new Map(products.map((p) => [p.productCode, p]));
+      enrichedFavorites = favorites.map((f) => {
+        const product = productMap.get(f.p_code);
+        return {
+          ...f,
+          product: product
+            ? {
+                name: product.name,
+                image: product.images?.[0]?.url || null,
+                mrp: product.price?.mrp ?? null,
+                sellingPrice: product.price?.sellingPrice ?? null
+              }
+            : null
+        };
+      });
+    }
+
+    const stats = orderStatsAgg[0] || {
+      totalOrders: 0,
+      totalSpent: 0,
+      completedOrders: 0,
+      cancelledOrders: 0,
+      lastOrderAt: null
+    };
+    stats.avgOrderValue = stats.totalOrders > 0 ? stats.totalSpent / stats.totalOrders : 0;
 
     res.status(200).json({
       success: true,
       data: {
-        user,
-        stats: orderStats[0] || {
-          totalOrders: 0,
-          totalSpent: 0,
-          completedOrders: 0,
-          cancelledOrders: 0
-        }
+        user: {
+          ...user,
+          pushEnabled: !!user.fcmToken,
+          platform: user.currentSession?.device?.platform || null
+        },
+        stats,
+        orders: recentOrders,
+        spendTrend: spendTrendAgg,
+        addresses,
+        favorites: enrichedFavorites,
+        notifications,
+        notificationStats: notifStatsAgg[0]
+          ? { totalCount: notifStatsAgg[0].totalCount, unreadCount: notifStatsAgg[0].unreadCount }
+          : { totalCount: 0, unreadCount: 0 }
       }
     });
   } catch (error) {
@@ -218,8 +320,8 @@ router.delete('/:id', checkPermission('users', 'delete'), async (req, res) => {
 
     // Check if user has active orders
     const activeOrders = await Order.countDocuments({
-      user: user._id,
-      status: { $in: ['pending', 'confirmed', 'processing', 'out_for_delivery'] }
+      mobile_no: user.mobile,
+      order_status: { $in: ACTIVE_ORDER_STATUSES }
     });
 
     if (activeOrders > 0) {
