@@ -104,6 +104,15 @@ const userSchema = new mongoose.Schema({
       create: { type: Boolean, default: false },
       edit: { type: Boolean, default: false },
       delete: { type: Boolean, default: false }
+    },
+    // Only 'view' is meaningful in practice (routes/admin/reports.js checks
+    // it alone — a report has nothing to create/edit/delete) but all four
+    // are declared for consistency with every other section here.
+    reports: {
+      view: { type: Boolean, default: false },
+      create: { type: Boolean, default: false },
+      edit: { type: Boolean, default: false },
+      delete: { type: Boolean, default: false }
     }
   },
   addresses: [{

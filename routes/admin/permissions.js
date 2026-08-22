@@ -12,7 +12,7 @@ const HomeUser = () => getTenantDb(DEFAULT_DB_NAME).models.User;
 router.use(requireSuperAdmin);
 
 // Valid permission sections and actions
-const VALID_SECTIONS = ['dashboard', 'users', 'orders', 'notifications', 'ecommerce', 'outlet', 'dynamicSection', 'offers', 'digitalCart'];
+const VALID_SECTIONS = ['dashboard', 'users', 'orders', 'notifications', 'ecommerce', 'outlet', 'dynamicSection', 'offers', 'digitalCart', 'reports'];
 const VALID_ACTIONS = ['view', 'create', 'edit', 'delete'];
 const DASHBOARD_ACTIONS = ['view']; // Dashboard only supports view
 

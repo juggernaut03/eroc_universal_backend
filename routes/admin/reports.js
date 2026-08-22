@@ -10,11 +10,11 @@ const { NON_REVENUE_STATUSES } = require('../../constants/orderStatus');
  *          given day, across every order, for restocking. Matches the
  *          legacy panel's export columns: Sr No. / P-Code / Product Name /
  *          Pack Size / Ordered Qty / Total Required Qty.
- * @access  Admin — reuses the 'orders' permission section since this is
- *          order-derived data, not its own resource.
+ * @access  Admin — its own 'reports' permission section (Admin Permissions
+ *          in the panel), independent of 'orders'.
  * @query   date=YYYY-MM-DD (defaults to today)
  */
-router.get('/procurement', checkPermission('orders', 'view'), async (req, res) => {
+router.get('/procurement', checkPermission('reports', 'view'), async (req, res) => {
   try {
     const date = (req.query.date || '').trim() || new Date().toISOString().slice(0, 10);
 
