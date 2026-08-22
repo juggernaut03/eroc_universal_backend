@@ -69,7 +69,19 @@ const genReferralCode = (mobile) => {
  */
 const getOrCreateAccount = async (user, session = null) => {
   let account = await LoyaltyAccount.findOne({ mobile: user.mobile }).session(session);
-  if (account) return account;
+  if (account) {
+    // Self-healing: an account that somehow never got a tier (e.g. created
+    // before any LoyaltyTier existed) picks one up on next read rather than
+    // showing `tier: null` forever.
+    if (!account.currentTierCode) {
+      // Required lazily to avoid a hard top-level dependency for the common
+      // (already-tiered) path - no circular require risk, loyaltyTierEngine
+      // never imports this module.
+      const { recalculateTier } = require('./loyaltyTierEngine');
+      await recalculateTier(account, session);
+    }
+    return account;
+  }
 
   // Two concurrent first-touches (e.g. a registration event and an order
   // event racing) both attempt to create - upsert makes the loser of the
@@ -90,6 +102,8 @@ const getOrCreateAccount = async (user, session = null) => {
         },
         { new: true, upsert: true, session }
       );
+      const { recalculateTier } = require('./loyaltyTierEngine');
+      await recalculateTier(created, session);
       return created;
     } catch (error) {
       if (isDuplicateKeyError(error) && /referralCode/.test(error.message)) {
