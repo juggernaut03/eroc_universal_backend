@@ -197,7 +197,8 @@ const buildEnrichmentMaps = async (sections) => {
   const subcategoryIdList = Array.from(subcategoryIds);
   const subcategoriesFromDb = subcategoryIdList.length
     ? await Subcategory.find({
-      idsub_category_master: { $in: subcategoryIdList }
+      idsub_category_master: { $in: subcategoryIdList },
+      is_visible: { $ne: false }
     }).lean()
     : [];
 
@@ -219,7 +220,8 @@ const buildEnrichmentMaps = async (sections) => {
   const categoryIdList = Array.from(categoryIds);
   const categoriesFromDb = categoryIdList.length
     ? await Category.find({
-      idcategory_master: { $in: categoryIdList }
+      idcategory_master: { $in: categoryIdList },
+      is_visible: { $ne: false }
     }).lean()
     : [];
 
@@ -355,7 +357,13 @@ const enrichPopularCategorySections = async (sections) => {
 
   return sections.map((section) => ({
     ...section,
-    subcategories: (section.subcategories || []).map((item) => enrichSubcategoryItem(item, subcategoryMap, categoryMap))
+    subcategories: (section.subcategories || [])
+      .map((item) => enrichSubcategoryItem(item, subcategoryMap, categoryMap))
+      // An item that names a subcategory but resolves to none was either a
+      // dangling reference or — the common case now — points at a
+      // subcategory an admin just hid from the storefront. Drop the tile
+      // rather than showing it with its name/image missing.
+      .filter((item) => !(toSafeString(item.sub_category_id) && !item.subcategory_details))
   }));
 };
 

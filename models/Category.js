@@ -37,6 +37,14 @@ const categorySchema = new mongoose.Schema({
     type: String,
     trim: true
   },
+  // Storefront visibility toggle, set from the admin panel. Defaults true so
+  // every pre-existing category (created before this field existed) keeps
+  // showing exactly as before. Admin routes ignore this — the admin panel
+  // always sees everything regardless of value.
+  is_visible: {
+    type: Boolean,
+    default: true
+  },
   project_code: {
     type: String,
     trim: true
@@ -55,8 +63,10 @@ categorySchema.index({ store_code: 1, dept_id: 1 });
 categorySchema.index({ store_code: 1, sequence_id: 1 });
 
 // Static method to find categories by store code and department ID
+// (storefront-facing — hidden categories are excluded; admin routes query
+// the model directly instead of via this static, so they see everything)
 categorySchema.statics.findByStoreAndDepartment = function (storeCode, deptId) {
-  const query = { store_code: storeCode };
+  const query = { store_code: storeCode, is_visible: { $ne: false } };
 
   if (deptId) {
     query.dept_id = deptId;
@@ -65,14 +75,14 @@ categorySchema.statics.findByStoreAndDepartment = function (storeCode, deptId) {
   return this.find(query).sort({ sequence_id: 1 });
 };
 
-// Static method to find categories by store code only
+// Static method to find categories by store code only (storefront-facing)
 categorySchema.statics.findByStoreCode = function (storeCode) {
-  return this.find({ store_code: storeCode }).sort({ sequence_id: 1 });
+  return this.find({ store_code: storeCode, is_visible: { $ne: false } }).sort({ sequence_id: 1 });
 };
 
-// Static method to find all categories sorted by sequence
+// Static method to find all categories sorted by sequence (storefront-facing)
 categorySchema.statics.findAllSorted = function () {
-  return this.find().sort({ sequence_id: 1 });
+  return this.find({ is_visible: { $ne: false } }).sort({ sequence_id: 1 });
 };
 
 module.exports = require('./tenantModel')('Category', categorySchema);

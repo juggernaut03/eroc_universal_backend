@@ -29,10 +29,12 @@ router.post('/get-categories', async (req, res, next) => {
     }
     
     
-    // Find categories for the specific store_code and dept_id
+    // Find categories for the specific store_code and dept_id (storefront —
+    // categories hidden from the mobile app via the admin panel are excluded)
     const categories = await Category.find({
       store_code: store_code.trim(),
-      dept_id: dept_id
+      dept_id: dept_id,
+      is_visible: { $ne: false }
     }).sort({ sequence_id: 1 });
     
     if (!categories || categories.length === 0) {

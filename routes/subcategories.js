@@ -38,10 +38,12 @@ router.post('/get-subcategories', async (req, res, next) => {
     }
     
     // Find categories for the specific store_code, dept_id, and idcategory_master
+    // (storefront — a hidden category has no visible subcategories under it)
     const categories = await Category.find({
       store_code: store_code.trim(),
       dept_id: dept_id,
-      idcategory_master: idcategory_master
+      idcategory_master: idcategory_master,
+      is_visible: { $ne: false }
     });
     
     if (!categories || categories.length === 0) {
@@ -60,9 +62,11 @@ router.post('/get-subcategories', async (req, res, next) => {
     // Extract category IDs from the found categories
     const categoryIds = categories.map(category => category.idcategory_master);
     
-    // Find subcategories for the category IDs
+    // Find subcategories for the category IDs (storefront — subcategories
+    // hidden from the mobile app via the admin panel are excluded)
     const subcategories = await Subcategory.find({
-      category_id: { $in: categoryIds }
+      category_id: { $in: categoryIds },
+      is_visible: { $ne: false }
     }).sort({ idsub_category_master: 1 });
     
     if (!subcategories || subcategories.length === 0) {
