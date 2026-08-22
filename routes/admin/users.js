@@ -5,6 +5,7 @@ const Order = require('../../models/Order');
 const Notification = require('../../models/Notification');
 const AddressBook = require('../../models/AddressBook');
 const Favorite = require('../../models/Favorite');
+const Cart = require('../../models/Cart');
 // The catalogue customers actually browse/favorite is ProductMaster
 // (collection `productmasters`, keyed by p_code) - not the unused legacy
 // Product model, which has no data in any live tenant.
@@ -144,7 +145,7 @@ router.get('/:id', checkPermission('users', 'view'), async (req, res) => {
 
     const mobile = user.mobile;
 
-    const [orderStatsAgg, recentOrders, spendTrendAgg, addresses, favorites, notifications, notifStatsAgg] =
+    const [orderStatsAgg, recentOrders, spendTrendAgg, addresses, favorites, notifications, notifStatsAgg, cart] =
       await Promise.all([
         Order.aggregate([
           { $match: { mobile_no: mobile } },
@@ -199,7 +200,8 @@ router.get('/:id', checkPermission('users', 'view'), async (req, res) => {
               unreadCount: { $sum: { $cond: [{ $eq: ['$isRead', false] }, 1, 0] } }
             }
           }
-        ])
+        ]),
+        Cart.findOne({ mobile_no: mobile }).lean()
       ]);
 
     // Enrich favorites with product name/image/price - Favorite only stores
@@ -250,6 +252,16 @@ router.get('/:id', checkPermission('users', 'view'), async (req, res) => {
         spendTrend: spendTrendAgg,
         addresses,
         favorites: enrichedFavorites,
+        cart: cart
+          ? {
+              store_code: cart.store_code,
+              items: cart.items,
+              subtotal: cart.subtotal,
+              total_items: cart.total_items,
+              total_quantity: cart.total_quantity,
+              last_updated: cart.last_updated
+            }
+          : null,
         notifications,
         notificationStats: notifStatsAgg[0]
           ? { totalCount: notifStatsAgg[0].totalCount, unreadCount: notifStatsAgg[0].unreadCount }
