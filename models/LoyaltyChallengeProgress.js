@@ -41,6 +41,13 @@ const loyaltyChallengeProgressSchema = new mongoose.Schema({
   claimedAt: {
     type: Date,
     default: null
+  },
+
+  // Guards against double-counting the same order if its delivered-hook
+  // fires more than once (see utils/loyaltyChallengeEngine.js).
+  lastOrderId: {
+    type: String,
+    default: null
   }
 }, {
   timestamps: true,

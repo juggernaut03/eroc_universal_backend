@@ -268,6 +268,12 @@ router.post('/:orderNumber/cancel', protect, async (req, res, next) => {
     });
     await order.save();
 
+    // Bypasses Order.updateStatus() (sets order_status directly above), so
+    // the loyalty hook that lives inside it doesn't fire on its own here.
+    require('../utils/loyaltyOrderHooks')
+      .onOrderCancelledOrRefunded(order)
+      .catch((e) => console.error('[loyalty] cancel hook error:', e));
+
     res.status(200).json({
       success: true,
       message: 'Order cancelled successfully',

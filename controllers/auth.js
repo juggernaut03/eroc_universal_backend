@@ -349,10 +349,42 @@ const verifyOtp = async (req, res) => {
     user.otpExpiresAt = undefined;
 
     // Save verified user (marks as verified if not already)
-    if (!user.isVerified) {
+    const isNewlyVerified = !user.isVerified;
+    if (isNewlyVerified) {
       user.isVerified = true;
     }
     await user.save();
+
+    // First-ever successful verification for this account = registration
+    // complete. Fire-and-forget so a loyalty hiccup never blocks login.
+    if (isNewlyVerified) {
+      const LoyaltyRule = require('../models/LoyaltyRule');
+      const { creditPoints } = require('../utils/loyaltyEngine');
+      const { notifyLoyaltyEvent } = require('../utils/loyaltyNotify');
+      (async () => {
+        try {
+          const rule = await LoyaltyRule.findOne({ event: 'REGISTRATION', status: 'ACTIVE' });
+          if (!rule) return;
+          const result = await creditPoints({
+            user,
+            points: rule.pointsValue,
+            source: 'REGISTRATION',
+            idempotencyKey: `REGISTRATION_${user._id}`,
+            status: 'COMPLETED'
+          });
+          if (!result.duplicate) {
+            await notifyLoyaltyEvent(user, {
+              title: `Welcome! You earned ${rule.pointsValue} points 🎉`,
+              body: 'Thanks for joining — start shopping to earn even more.',
+              data: { loyaltyEventType: 'POINTS_EARNED', source: 'REGISTRATION' },
+              projectCode: req.tenant?.projectCode
+            });
+          }
+        } catch (e) {
+          console.error('[loyalty] registration credit error:', e);
+        }
+      })();
+    }
 
     // Generate the access/refresh pair
     const tokens = await issueTokens(user, (req.body && req.body.device) || '');

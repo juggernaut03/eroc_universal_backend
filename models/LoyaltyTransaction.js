@@ -55,6 +55,19 @@ const loyaltyTransactionSchema = new mongoose.Schema({
     required: true
   },
 
+  // CREDIT-only: how much of this batch's `points` hasn't yet been consumed
+  // by a later DEBIT or EXPIRATION. Points are spent oldest-expiry-first
+  // (see utils/loyaltyEngine.js's consumePoints), so a redemption or an
+  // expiry run decrements this rather than the account balance directly -
+  // that's what lets "12 months from earn date" expiry stay correct even
+  // after some of the balance has since been spent from a different batch.
+  // Always 0 for non-CREDIT rows.
+  remainingPoints: {
+    type: Number,
+    default: 0,
+    min: 0
+  },
+
   // What this transaction is about (an order id, a redemption id, a
   // referral id...) - loose string so one field covers every source.
   referenceId: {
@@ -107,5 +120,8 @@ loyaltyTransactionSchema.index({ idempotencyKey: 1 }, { unique: true });
 loyaltyTransactionSchema.index({ referenceId: 1 });
 loyaltyTransactionSchema.index({ expiresAt: 1, status: 1 });
 loyaltyTransactionSchema.index({ availableAt: 1, status: 1 });
+// Powers the FIFO consumption query in utils/loyaltyEngine.js: find this
+// customer's spendable batches, oldest-expiring first.
+loyaltyTransactionSchema.index({ mobile: 1, type: 1, status: 1, remainingPoints: 1, expiresAt: 1 });
 
 module.exports = require('./tenantModel')('LoyaltyTransaction', loyaltyTransactionSchema);

@@ -38,6 +38,12 @@ const userSchema = new mongoose.Schema({
     lowercase: true,
     match: [/^\w+([.-]?\w+)*@\w+([.-]?\w+)*(\.\w{2,3})+$/, 'Please enter a valid email']
   },
+  // Optional. Only used by the loyalty BIRTHDAY earning rule
+  // (scripts/loyalty_award_birthday_points.js) - never required at signup.
+  dateOfBirth: {
+    type: Date,
+    default: null
+  },
   role: {
     type: String,
     enum: ['user', 'admin'],

@@ -671,6 +671,19 @@ router.post('/bulk-update-status', checkPermission('orders', 'edit'), async (req
       ? await Order.bulkWrite(operations)
       : { matchedCount: 0, modifiedCount: 0 };
 
+    // bulkWrite bypasses Order.updateStatus() entirely (no save(), no
+    // hooks), so the loyalty integration that lives inside it never fires
+    // on its own for this route - fetch the now-updated full documents and
+    // fire it explicitly for the two statuses loyalty cares about.
+    if (status === 'delivered' || status === 'cancelled') {
+      const { onOrderDelivered, onOrderCancelledOrRefunded } = require('../../utils/loyaltyOrderHooks');
+      const updated = await Order.find({ _id: { $in: targets.map((t) => t._id) } });
+      const hook = status === 'delivered' ? onOrderDelivered : onOrderCancelledOrRefunded;
+      updated.forEach((order) => {
+        hook(order).catch((e) => console.error('[loyalty] bulk-update hook error:', e));
+      });
+    }
+
     res.status(200).json({
       success: true,
       message: `Updated ${result.modifiedCount} orders to ${status}`,

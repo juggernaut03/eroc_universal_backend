@@ -427,7 +427,20 @@ orderSchema.methods.updateStatus = function(newStatus, actor, note) {
       break;
   }
 
-  return this.save();
+  return this.save().then((saved) => {
+    // Fire-and-forget: loyalty processing must never block or fail an order
+    // status change (loyalty_rewards_frd.md section 75). Lazily required to
+    // avoid a circular require - loyaltyOrderHooks needs the Order model
+    // too, and this file's own module.exports isn't assigned until the very
+    // bottom, so a top-level require here would see an incomplete export.
+    const { onOrderDelivered, onOrderCancelledOrRefunded } = require('../utils/loyaltyOrderHooks');
+    if (status === 'delivered') {
+      onOrderDelivered(saved).catch((e) => console.error('[loyalty] delivered hook error:', e));
+    } else if (status === ORDER_STATUS.CANCELLED) {
+      onOrderCancelledOrRefunded(saved).catch((e) => console.error('[loyalty] cancel hook error:', e));
+    }
+    return saved;
+  });
 };
 
 // Instance method to calculate delivery date based on slot
