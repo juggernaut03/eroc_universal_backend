@@ -109,6 +109,15 @@ const loyaltyTransactionSchema = new mongoose.Schema({
   expiresAt: {
     type: Date,
     default: null
+  },
+
+  // Which "expiring soon" reminder thresholds (30/7/1 days,
+  // loyalty_rewards_frd.md section 23) have already been sent for this
+  // batch, so scripts/loyalty_expire_points.js's daily run doesn't re-notify
+  // the same threshold every day it's within.
+  notifiedExpiryStages: {
+    type: [Number],
+    default: []
   }
 }, {
   timestamps: true,

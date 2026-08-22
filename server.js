@@ -83,6 +83,7 @@ const digitalCartRoutes = require('./routes/digital-cart');
 const onboardingRoutes = require('./routes/onboarding');
 const homeRoutes = require('./routes/home');
 const homeAnalyticsRoutes = require('./routes/home-analytics');
+const loyaltyRoutes = require('./routes/loyalty');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -319,6 +320,10 @@ app.use('/api/onboarding', onboardingRoutes);
 app.use('/api/home', homeRoutes);
 app.use('/api/home', homeAnalyticsRoutes);
 app.use('/api/admin', adminRoutes);
+// Mounted at /api/loyalty rather than the FRD's /api/v1/loyalty - no other
+// route in this API is versioned, so a lone /v1 prefix here would be an
+// inconsistency, not a convention.
+app.use('/api/loyalty', loyaltyRoutes);
 app.use('/api/razorpay', razorpayRoutes);
 app.use('/api/notifications', notificationRoutes);
 

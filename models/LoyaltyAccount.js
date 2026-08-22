@@ -89,7 +89,7 @@ const loyaltyAccountSchema = new mongoose.Schema({
   collection: 'loyalty_accounts'
 });
 
-loyaltyAccountSchema.index({ mobile: 1 }, { unique: true });
+// mobile already has unique:true on the field, which creates its index.
 loyaltyAccountSchema.index({ userId: 1 });
 loyaltyAccountSchema.index({ currentTierCode: 1 });
 

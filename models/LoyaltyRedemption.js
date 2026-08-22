@@ -77,7 +77,7 @@ const loyaltyRedemptionSchema = new mongoose.Schema({
 });
 
 loyaltyRedemptionSchema.index({ mobile: 1, status: 1 });
-loyaltyRedemptionSchema.index({ couponCode: 1 }, { unique: true });
+// couponCode already has unique:true on the field, which creates its index.
 loyaltyRedemptionSchema.index({ expiresAt: 1, status: 1 });
 
 module.exports = require('./tenantModel')('LoyaltyRedemption', loyaltyRedemptionSchema);
