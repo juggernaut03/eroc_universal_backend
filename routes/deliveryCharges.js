@@ -12,6 +12,7 @@ router.post('/calculate', async (req, res) => {
       store_code,
       address_latitude,
       address_longitude,
+      address_pincode,
       order_amount = 0
     } = req.body;
 
@@ -33,8 +34,24 @@ router.post('/calculate', async (req, res) => {
       });
     }
 
-    // Get store coordinates from DB
-    const store = await Store.findOne({ store_code: store_code.trim() }).lean();
+    // A store has one row per serviceable pincode (pincodestoremasters),
+    // each independently configurable in the admin panel under Outlet >
+    // Delivery Fees — base charge, per-km rate, handling/package fees and
+    // max delivery radius can all differ by pincode. Prefer the row
+    // registered for the delivery address's own pincode; store_code alone
+    // is ambiguous across rows and Mongo returns whichever one it finds
+    // first, which silently ignored whatever the admin configured for
+    // every other pincode.
+    let store = null;
+    if (address_pincode) {
+      store = await Store.findOne({
+        store_code: store_code.trim(),
+        pincode: address_pincode.trim()
+      }).lean();
+    }
+    if (!store) {
+      store = await Store.findOne({ store_code: store_code.trim() }).lean();
+    }
 
     if (!store) {
       return res.status(404).json({
