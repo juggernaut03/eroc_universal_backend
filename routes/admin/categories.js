@@ -3,6 +3,7 @@ const router = express.Router();
 const Category = require('../../models/Category');
 const Department = require('../../models/Department');
 const Subcategory = require('../../models/Subcategory');
+const CategorySubcategoryMap = require('../../models/CategorySubcategoryMap');
 const { checkPermission } = require('../../middleware/checkPermission');
 
 // All routes in this file fall under the 'ecommerce' permission section
@@ -27,6 +28,63 @@ const buildDepartmentNameMap = async (deptIds = []) => {
 };
 
 const buildSearchRegex = (search) => ({ $regex: search.trim(), $options: 'i' });
+
+// Batched reverse lookup for the by-store subcategory list: which additional
+// categories (beyond the primary) is each subcategory cross-mapped to.
+const buildAdditionalCategoryIdsMap = async (subCategoryIds = []) => {
+  const uniqueIds = [...new Set(subCategoryIds.filter(Boolean))];
+  if (uniqueIds.length === 0) return {};
+
+  const mappings = await CategorySubcategoryMap.find({
+    idsub_category_master: { $in: uniqueIds }
+  });
+
+  return mappings.reduce((acc, mapping) => {
+    const list = acc[mapping.idsub_category_master] || (acc[mapping.idsub_category_master] = []);
+    list.push(mapping.idcategory_master);
+    return acc;
+  }, {});
+};
+
+// Validates `additionalCategoryIds` (every id must resolve to a real Category
+// in the same store as the subcategory's own primary category — a store's
+// category tree should not silently absorb another store's category id) and
+// syncs CategorySubcategoryMap to exactly that set. Only called when the
+// caller's request body explicitly names the field (see the `in req.body`
+// guards below) — a request that doesn't mention mappings must never touch
+// them, e.g. the list page's `{ is_visible }`-only partial update.
+const syncAdditionalCategoryMappings = async (subcategory, additionalCategoryIds) => {
+  const primaryCategory = await Category.findOne({ idcategory_master: subcategory.category_id });
+  if (!primaryCategory) {
+    throw Object.assign(
+      new Error('Cannot manage additional category mappings: this subcategory\'s primary category_id does not match any existing category.'),
+      { statusCode: 400 }
+    );
+  }
+
+  const storeCode = primaryCategory.store_code;
+  const uniqueIds = [...new Set((additionalCategoryIds || []).filter(Boolean))]
+    .filter((id) => id !== subcategory.category_id); // mapping to your own primary is a no-op, not an error
+
+  if (uniqueIds.length > 0) {
+    const validCount = await Category.countDocuments({
+      idcategory_master: { $in: uniqueIds },
+      store_code: storeCode
+    });
+    if (validCount !== uniqueIds.length) {
+      throw Object.assign(
+        new Error('One or more additional category IDs are invalid for this subcategory\'s store.'),
+        { statusCode: 400 }
+      );
+    }
+  }
+
+  await CategorySubcategoryMap.replaceForSubcategory(
+    subcategory.idsub_category_master,
+    storeCode,
+    uniqueIds
+  );
+};
 
 // ==================== CATEGORY MANAGEMENT ====================
 
@@ -703,11 +761,15 @@ router.post('/subcategories/by-store', viewPerm, async (req, res) => {
     const deptNameMap = await buildDepartmentNameMap(
       subcategories.map((sub) => categoryDeptMap[sub.category_id])
     );
+    const additionalCategoryIdsMap = await buildAdditionalCategoryIdsMap(
+      subcategories.map((sub) => sub.idsub_category_master)
+    );
     const enrichedSubcategories = subcategories.map((sub) => {
       const deptId = categoryDeptMap[sub.category_id];
       return {
         ...sub.toObject(),
         department_name: deptNameMap[deptId] || '',
+        additional_category_ids: additionalCategoryIdsMap[sub.idsub_category_master] || [],
       };
     });
 
@@ -741,6 +803,10 @@ router.post('/subcategories', createPerm, async (req, res) => {
   try {
     const subcategory = await Subcategory.create(req.body);
 
+    if ('additional_category_ids' in req.body) {
+      await syncAdditionalCategoryMappings(subcategory, req.body.additional_category_ids);
+    }
+
     res.status(201).json({
       success: true,
       message: 'Subcategory created successfully',
@@ -748,9 +814,9 @@ router.post('/subcategories', createPerm, async (req, res) => {
     });
   } catch (error) {
     console.error('Create subcategory error:', error);
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Error creating subcategory',
+      message: error.statusCode ? error.message : 'Error creating subcategory',
       error: error.message
     });
   }
@@ -774,6 +840,13 @@ router.put('/subcategories/:id', editPerm, async (req, res) => {
       });
     }
 
+    // Guarded by presence, not truthiness: a request that never mentions
+    // mappings (e.g. the list page's `{ is_visible }`-only toggle) must never
+    // touch them, while an explicit `[]` must clear them.
+    if ('additional_category_ids' in req.body) {
+      await syncAdditionalCategoryMappings(subcategory, req.body.additional_category_ids);
+    }
+
     res.status(200).json({
       success: true,
       message: 'Subcategory updated successfully',
@@ -781,9 +854,9 @@ router.put('/subcategories/:id', editPerm, async (req, res) => {
     });
   } catch (error) {
     console.error('Update subcategory error:', error);
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Error updating subcategory',
+      message: error.statusCode ? error.message : 'Error updating subcategory',
       error: error.message
     });
   }

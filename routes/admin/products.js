@@ -2,12 +2,53 @@ const express = require('express');
 const router = express.Router();
 const Product = require('../../models/Product');
 const ProductMaster = require('../../models/ProductMaster');
+const Subcategory = require('../../models/Subcategory');
+const SubcategoryProductMap = require('../../models/SubcategoryProductMap');
 const { checkPermission } = require('../../middleware/checkPermission');
 
 const viewPerm = checkPermission('ecommerce', 'view');
 const createPerm = checkPermission('ecommerce', 'create');
 const editPerm = checkPermission('ecommerce', 'edit');
 const deletePerm = checkPermission('ecommerce', 'delete');
+
+// Batched reverse lookup for the by-store product list: which additional
+// subcategories (beyond the primary) is each product cross-mapped to.
+const buildAdditionalSubCategoryIdsMap = async (pCodes = []) => {
+  const uniqueCodes = [...new Set(pCodes.filter(Boolean))];
+  if (uniqueCodes.length === 0) return {};
+
+  const mappings = await SubcategoryProductMap.find({ p_code: { $in: uniqueCodes } });
+
+  return mappings.reduce((acc, mapping) => {
+    const list = acc[mapping.p_code] || (acc[mapping.p_code] = []);
+    list.push(mapping.idsub_category_master);
+    return acc;
+  }, {});
+};
+
+// Validates `additionalSubCategoryIds` (every id must resolve to a real
+// Subcategory) and syncs SubcategoryProductMap to exactly that set. Only
+// called when the caller's request body explicitly names the field (see the
+// `in req.body` guards below) — a request that doesn't mention mappings must
+// never touch them, e.g. a `{ pcode_status }`-only partial update.
+const syncAdditionalSubCategoryMappings = async (product, additionalSubCategoryIds) => {
+  const uniqueIds = [...new Set((additionalSubCategoryIds || []).filter(Boolean))]
+    .filter((id) => id !== product.sub_category_id); // mapping to your own primary is a no-op, not an error
+
+  if (uniqueIds.length > 0) {
+    const validCount = await Subcategory.countDocuments({
+      idsub_category_master: { $in: uniqueIds }
+    });
+    if (validCount !== uniqueIds.length) {
+      throw Object.assign(
+        new Error('One or more additional subcategory IDs do not exist.'),
+        { statusCode: 400 }
+      );
+    }
+  }
+
+  await SubcategoryProductMap.replaceForProduct(product.p_code, product.store_code, uniqueIds);
+};
 
 // @route   GET /api/admin/products
 // @desc    Get all products with advanced filtering and pagination
@@ -167,6 +208,10 @@ router.post('/by-store', viewPerm, async (req, res) => {
     // Get total count for pagination
     const total = await ProductMaster.countDocuments(query);
 
+    const additionalSubCategoryIdsMap = await buildAdditionalSubCategoryIdsMap(
+      products.map(product => product.p_code)
+    );
+
     // Format response data
     const productsData = products.map(product => ({
       id: product._id,
@@ -184,6 +229,7 @@ router.post('/by-store', viewPerm, async (req, res) => {
       dept_id: product.dept_id,
       category_id: product.category_id,
       sub_category_id: product.sub_category_id,
+      additional_sub_category_ids: additionalSubCategoryIdsMap[product.p_code] || [],
       store_quantity: product.store_quantity,
       max_quantity_allowed: product.max_quantity_allowed,
       pcode_img: product.pcode_img
@@ -612,6 +658,10 @@ router.post('/master', createPerm, async (req, res) => {
   try {
     const product = await ProductMaster.create(req.body);
 
+    if ('additional_sub_category_ids' in req.body) {
+      await syncAdditionalSubCategoryMappings(product, req.body.additional_sub_category_ids);
+    }
+
     res.status(201).json({
       success: true,
       message: 'Product created successfully',
@@ -627,9 +677,9 @@ router.post('/master', createPerm, async (req, res) => {
       });
     }
 
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Error creating product',
+      message: error.statusCode ? error.message : 'Error creating product',
       error: error.message
     });
   }
@@ -653,6 +703,11 @@ router.put('/master/:id', editPerm, async (req, res) => {
       });
     }
 
+    // Guarded by presence, not truthiness — see syncAdditionalSubCategoryMappings.
+    if ('additional_sub_category_ids' in req.body) {
+      await syncAdditionalSubCategoryMappings(product, req.body.additional_sub_category_ids);
+    }
+
     res.status(200).json({
       success: true,
       message: 'Product updated successfully',
@@ -660,9 +715,9 @@ router.put('/master/:id', editPerm, async (req, res) => {
     });
   } catch (error) {
     console.error('Update ProductMaster error:', error);
-    res.status(500).json({
+    res.status(error.statusCode || 500).json({
       success: false,
-      message: 'Error updating product',
+      message: error.statusCode ? error.message : 'Error updating product',
       error: error.message
     });
   }

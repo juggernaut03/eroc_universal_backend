@@ -1,6 +1,11 @@
 const express = require('express');
 const router = express.Router();
 const ProductMaster = require('../models/ProductMaster');
+const SubcategoryProductMap = require('../models/SubcategoryProductMap');
+const {
+  resolveSubcategoryIdsForCategories,
+  buildProductScopeFilter
+} = require('../utils/catalogueResolution');
 
 // Values that mean "every subcategory in this category" rather than naming one.
 //
@@ -135,22 +140,24 @@ router.post('/search-products', async (req, res, next) => {
     const searchQuery = {
       store_code: store_code.trim(),
       pcode_status: 'Y',
-      $or: [{ product_name: pattern }, { brand_name: pattern }]
+      $and: [{ $or: [{ product_name: pattern }, { brand_name: pattern }] }]
     };
-    
-    // Add optional filters if provided
-    if (dept_id) {
+
+    // Narrow by subcategory/category scope (cross-mapping aware — see
+    // catalogueResolution.js). dept_id alone still filters directly: M:N
+    // mapping doesn't reach the department level, and a bare dept_id-only
+    // search has no subcategory set to resolve.
+    if (sub_category_id) {
+      const scopeFilter = await buildProductScopeFilter([sub_category_id], store_code.trim());
+      searchQuery.$and.push(scopeFilter);
+    } else if (category_id) {
+      const subcategoryIds = await resolveSubcategoryIdsForCategories([category_id], store_code.trim());
+      const scopeFilter = await buildProductScopeFilter(subcategoryIds, store_code.trim());
+      searchQuery.$and.push(scopeFilter);
+    } else if (dept_id) {
       searchQuery.dept_id = dept_id;
     }
-    
-    if (category_id) {
-      searchQuery.category_id = category_id;
-    }
-    
-    if (sub_category_id) {
-      searchQuery.sub_category_id = sub_category_id;
-    }
-    
+
     // Find products matching the search criteria
     const products = await ProductMaster.find(searchQuery).sort({ product_name: 1 });
     
@@ -252,30 +259,47 @@ router.post('/get-product-by-pcode', async (req, res, next) => {
       });
     }
     
-    // Find the specific product using all filters including pcode
+    // dept_id/category_id stay required, validated inputs (unchanged API
+    // contract) but are NOT used as match filters below: once a subcategory
+    // can be cross-mapped into a category other than its primary one, there
+    // is no single "correct" dept_id/category_id to require a match against
+    // — a product reached via a cross-mapped subcategory legitimately carries
+    // a different category_id than the one the client is browsing under.
+    // sub_category_id is verified explicitly instead, against the product's
+    // own primary subcategory OR its SubcategoryProductMap entries.
     const product = await ProductMaster.findOne({
+      store_code: store_code.trim(),
+      p_code: pcode,
+      pcode_status: 'Y'
+    });
+
+    const notFoundResponse = () => res.status(200).json({
+      success: true,
+      count: 0,
+      message: `No product found for store_code: ${store_code.trim()}, dept_id: ${dept_id}, category_id: ${category_id}, sub_category_id: ${sub_category_id}, and pcode: ${pcode}`,
       store_code: store_code.trim(),
       dept_id: dept_id,
       category_id: category_id,
       sub_category_id: sub_category_id,
-      p_code: pcode,
-      pcode_status: 'Y'
+      pcode: pcode,
+      data: null
     });
-    
+
     if (!product) {
-      return res.status(200).json({
-        success: true,
-        count: 0,
-        message: `No product found for store_code: ${store_code.trim()}, dept_id: ${dept_id}, category_id: ${category_id}, sub_category_id: ${sub_category_id}, and pcode: ${pcode}`,
-        store_code: store_code.trim(),
-        dept_id: dept_id,
-        category_id: category_id,
-        sub_category_id: sub_category_id,
-        pcode: pcode,
-        data: null
-      });
+      return notFoundResponse();
     }
-    
+
+    if (product.sub_category_id !== sub_category_id) {
+      const mapped = await SubcategoryProductMap.exists({
+        p_code: pcode,
+        idsub_category_master: sub_category_id,
+        store_code: store_code.trim()
+      });
+      if (!mapped) {
+        return notFoundResponse();
+      }
+    }
+
     // Format response data
     const productData = {
       id: product._id,
@@ -359,14 +383,23 @@ router.post('/get-products', async (req, res, next) => {
     // installed gets a working ALL tab as soon as this deploys.
     const subCategoryFilter = normaliseSubCategoryId(sub_category_id);
 
-    // Find products using the filters
-    const products = await ProductMaster.findByFilters({
+    // Resolve which subcategories are in scope: either the one explicitly
+    // requested, or — for the "ALL" sentinel — every subcategory (primary +
+    // cross-mapped) under this category. Either way, dept_id/category_id are
+    // NOT used as ProductMaster match filters from here on: a subcategory
+    // cross-mapped into this category can hold products whose own primary
+    // category_id points elsewhere, and those products are exactly the ones
+    // this endpoint must still return (see catalogueResolution.js).
+    const targetSubcategoryIds = subCategoryFilter
+      ? [subCategoryFilter]
+      : await resolveSubcategoryIdsForCategories([category_id], store_code.trim());
+
+    const scopeFilter = await buildProductScopeFilter(targetSubcategoryIds, store_code.trim());
+    const products = await ProductMaster.find({
       store_code: store_code.trim(),
-      dept_id: dept_id,
-      category_id: category_id,
-      // null here means findByFilters leaves subcategory out of the query.
-      sub_category_id: subCategoryFilter
-    });
+      pcode_status: 'Y',
+      ...scopeFilter
+    }).sort({ product_name: 1 });
 
     const scopeLabel = subCategoryFilter
       ? `sub_category_id: ${subCategoryFilter}`
