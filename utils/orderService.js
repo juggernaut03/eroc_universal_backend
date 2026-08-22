@@ -6,8 +6,10 @@ const AddressBook = require('../models/AddressBook');
 const DeliverySlot = require('../models/DeliverySlot');
 const PaymentMode = require('../models/PaymentMode');
 const ProductMaster = require('../models/ProductMaster');
+const LoyaltyRedemption = require('../models/LoyaltyRedemption');
 
 const razorpayService = require('./razorpayService');
+const { previewRedemptionDiscount, markRedemptionUsed } = require('./loyaltyRedemption');
 const { getTenantConnection } = require('../config/tenantContext');
 const {
   calculateDistance,
@@ -436,6 +438,7 @@ const placeOrder = async ({ user, body, project }) => {
     payment_details,
     offer_id,
     deal_items,
+    loyalty_redemption_id,
   } = body || {};
 
   // --- Required selectors (note: no amounts, and no cart_validated flag) ---
@@ -478,6 +481,24 @@ const placeOrder = async ({ user, body, project }) => {
   }
   if (deliveryAddress.mobile_number !== userMobile) {
     throw new OrderError('You can only use your own addresses for delivery', 403);
+  }
+
+  // --- Loyalty reward voucher, if the customer picked one at checkout ---
+  // Validated up front so an invalid/expired/already-used voucher fails
+  // fast rather than silently charging full price - the customer's not
+  // shown the loyalty discount in this response otherwise.
+  let loyaltyRedemption = null;
+  if (loyalty_redemption_id) {
+    loyaltyRedemption = await LoyaltyRedemption.findOne({ _id: loyalty_redemption_id, mobile: userMobile });
+    if (!loyaltyRedemption) {
+      throw new OrderError('Reward voucher not found', 404);
+    }
+    if (loyaltyRedemption.status !== 'ACTIVE') {
+      throw new OrderError('This reward voucher has already been used or is no longer active', 400);
+    }
+    if (loyaltyRedemption.expiresAt < new Date()) {
+      throw new OrderError('This reward voucher has expired', 400);
+    }
   }
 
   const deliveryDateObj = new Date(delivery_date);
@@ -531,11 +552,36 @@ const placeOrder = async ({ user, body, project }) => {
     subtotal
   );
 
+  // --- Loyalty reward voucher discount, computed server-side against the
+  // now-known subtotal/delivery charges - never trust a client-supplied
+  // amount for this. Stacks with a cart offer (independent mechanisms); the
+  // FREE_PRODUCT/SPECIAL_OFFER types return invalid:true and are fulfilled
+  // manually, so they never affect the total here.
+  let loyaltyDiscountAmount = 0;
+  let appliedLoyaltyRedemption = null;
+  if (loyaltyRedemption) {
+    const preview = previewRedemptionDiscount(loyaltyRedemption, {
+      orderSubtotal: round2(subtotal - discountAmount),
+      deliveryCharges,
+    });
+    if (!preview.valid) {
+      throw new OrderError(preview.reason || 'This reward voucher cannot be applied to this order', 400);
+    }
+    loyaltyDiscountAmount = preview.discountAmount;
+    appliedLoyaltyRedemption = {
+      redemption_id: loyaltyRedemption._id.toString(),
+      reward_name: loyaltyRedemption.rewardSnapshot.name,
+      discount_amount: loyaltyDiscountAmount,
+    };
+  }
+
+  const totalDiscount = round2(discountAmount + loyaltyDiscountAmount);
+
   // Tax is inside `subtotal`, so it is reported, not added. Adding it here is
   // what made the payable total disagree with the amount the shopper was shown
   // and actually paid — see the note on TAX_RATE.
-  const totalAmount = round2(subtotal + deliveryCharges - discountAmount);
-  const taxAmount = includedTax(subtotal - discountAmount);
+  const totalAmount = round2(subtotal + deliveryCharges - totalDiscount);
+  const taxAmount = includedTax(subtotal - totalDiscount);
 
   // --- Payment, verified against the gateway ---
   const { paymentStatus, transactionId, verifiedPayment } = await resolvePaymentStatus({
@@ -590,11 +636,12 @@ const placeOrder = async ({ user, body, project }) => {
       delivery_charges: deliveryCharges,
       delivery_distance_km: distanceKm,
       tax_amount: taxAmount,
-      discount_amount: discountAmount,
+      discount_amount: totalDiscount,
       total_amount: totalAmount,
       total_items: orderItems.length,
       total_quantity: totalQuantity,
       applied_offer: appliedOffer || undefined,
+      applied_loyalty_redemption: appliedLoyaltyRedemption || undefined,
       deal_items_applied: dealItemsApplied.length > 0 ? dealItemsApplied : undefined,
       deal_savings: dealSavings || undefined,
     },
@@ -615,6 +662,10 @@ const placeOrder = async ({ user, body, project }) => {
         const order = new Order(buildOrder(orderNumber));
 
         const savedOrder = await order.save({ session });
+
+        if (loyaltyRedemption) {
+          await markRedemptionUsed(loyaltyRedemption, savedOrder._id, session);
+        }
 
         await Cart.updateOne(
           { mobile_no: userMobile },

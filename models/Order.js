@@ -266,6 +266,11 @@ const orderSchema = new mongoose.Schema({
       discount_type: { type: String },
       discount_amount: { type: Number }
     },
+    applied_loyalty_redemption: {
+      redemption_id: { type: String },
+      reward_name: { type: String },
+      discount_amount: { type: Number }
+    },
     deal_items_applied: [{
       offer_id: { type: String },
       offer_title: { type: String },
