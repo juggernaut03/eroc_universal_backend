@@ -5,7 +5,10 @@ const Order = require('../../models/Order');
 const Notification = require('../../models/Notification');
 const AddressBook = require('../../models/AddressBook');
 const Favorite = require('../../models/Favorite');
-const Product = require('../../models/Product');
+// The catalogue customers actually browse/favorite is ProductMaster
+// (collection `productmasters`, keyed by p_code) - not the unused legacy
+// Product model, which has no data in any live tenant.
+const ProductMaster = require('../../models/ProductMaster');
 const { checkPermission } = require('../../middleware/checkPermission');
 const { ORDER_STATUS } = require('../../constants/orderStatus');
 
@@ -200,24 +203,25 @@ router.get('/:id', checkPermission('users', 'view'), async (req, res) => {
       ]);
 
     // Enrich favorites with product name/image/price - Favorite only stores
-    // p_code, not a Product ref.
+    // p_code + store_code, not a product ref. p_code is only unique per
+    // store, so match on both.
     let enrichedFavorites = favorites;
     if (favorites.length) {
-      const productCodes = [...new Set(favorites.map((f) => f.p_code))];
-      const products = await Product.find({ productCode: { $in: productCodes } })
-        .select('productCode name images price')
+      const codePairs = favorites.map((f) => ({ p_code: f.p_code, store_code: f.store_code }));
+      const products = await ProductMaster.find({ $or: codePairs })
+        .select('p_code store_code product_name pcode_img product_mrp our_price')
         .lean();
-      const productMap = new Map(products.map((p) => [p.productCode, p]));
+      const productMap = new Map(products.map((p) => [`${p.p_code}::${p.store_code}`, p]));
       enrichedFavorites = favorites.map((f) => {
-        const product = productMap.get(f.p_code);
+        const product = productMap.get(`${f.p_code}::${f.store_code}`);
         return {
           ...f,
           product: product
             ? {
-                name: product.name,
-                image: product.images?.[0]?.url || null,
-                mrp: product.price?.mrp ?? null,
-                sellingPrice: product.price?.sellingPrice ?? null
+                name: product.product_name,
+                image: product.pcode_img || null,
+                mrp: product.product_mrp ? parseFloat(product.product_mrp.toString()) : null,
+                sellingPrice: product.our_price ? parseFloat(product.our_price.toString()) : null
               }
             : null
         };
