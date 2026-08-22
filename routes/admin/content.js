@@ -1236,6 +1236,7 @@ router.get('/pincodes', outView, async (req, res) => {
       page = 1,
       limit = 20,
       search = '',
+      storeCode = '',
       sortBy = 'pincode',
       sortOrder = 'asc'
     } = req.query;
@@ -1248,6 +1249,11 @@ router.get('/pincodes', outView, async (req, res) => {
         { area: { $regex: search, $options: 'i' } },
         { city: { $regex: search, $options: 'i' } }
       ];
+    }
+
+    // Which pincodes a store covers — used by the Stores page.
+    if (storeCode) {
+      query.store_code = storeCode.trim().toUpperCase();
     }
 
     const sort = {};

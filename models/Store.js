@@ -1,9 +1,15 @@
 const mongoose = require('mongoose');
 
 const storeSchema = new mongoose.Schema({
+  // Legacy: this collection used to hold one row per (store_code, pincode)
+  // pair, so a store serving 30 pincodes meant 30 duplicate rows with their
+  // own independently-editable (and prone-to-drift — see
+  // scripts/consolidate_store_pincodes.js) delivery config. A store is now
+  // ONE row; which pincodes it serves lives on Pincode.store_code instead
+  // (models/Pincode.js). No longer required or used for lookups — kept only
+  // so pre-migration documents/exports still round-trip.
   pincode: {
     type: String,
-    required: [true, 'Pincode is required'],
     trim: true,
     match: [/^\d{6}$/, 'Please enter a valid 6-digit pincode']
   },
