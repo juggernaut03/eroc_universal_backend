@@ -82,6 +82,13 @@ const projectSchema = new mongoose.Schema(
     secrets: {
       razorpay_key_secret: { type: String, default: '', select: false },
       sms_api_key: { type: String, default: '', select: false },
+      // Full Admin SDK service account JSON (as a string) for this tenant's
+      // OWN Firebase project. Each app flavor mints FCM tokens against its
+      // own project (android/app/src/<flavor>/google-services.json), not a
+      // shared one — sending via a different project's credentials fails
+      // outright with "SenderId mismatch". Unset means this tenant falls
+      // back to the shared FIREBASE_SERVICE_ACCOUNT_JSON app (see utils/fcm.js).
+      firebase_service_account_json: { type: String, default: '', select: false },
     },
   },
   { timestamps: true, collection: 'projects' }

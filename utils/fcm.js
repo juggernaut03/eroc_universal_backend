@@ -1,31 +1,93 @@
 const admin = require('firebase-admin');
 
-// Initialize Firebase Admin SDK
-let firebaseApp;
+// Multi-tenant Firebase Admin SDK.
+//
+// Each app flavor mints its FCM tokens against ITS OWN Firebase project
+// (see android/app/src/<flavor>/google-services.json) — myneedmart's tokens
+// belong to `my-need-mart-46f0d`, pagariya's to `patelrmartnotifications`,
+// neither of which is the single `shalviecomweb` project this file used to
+// send everything through. Sending a token via the wrong project's
+// credentials always fails with "SenderId mismatch" (seen live for
+// My Need Mart, 2026-08-22) — the token and the sending credential have to
+// belong to the same Firebase project.
+//
+// Falls back to the shared default app (FIREBASE_SERVICE_ACCOUNT_JSON) for
+// any tenant that hasn't been given its own service account yet in
+// Project.secrets.firebase_service_account_json — so this is backward
+// compatible until each tenant's credential is added.
 
-const initializeFirebase = () => {
-    if (firebaseApp) {
-        return firebaseApp;
+const namedApps = new Map(); // project_code -> admin.app.App
+let defaultApp; // the original single shared app
+
+const initializeDefaultFirebase = () => {
+    if (defaultApp) {
+        return defaultApp;
     }
 
     try {
-        // Initialize with JSON from environment variable
         const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
 
         if (serviceAccountJson) {
             const serviceAccount = JSON.parse(serviceAccountJson);
-            firebaseApp = admin.initializeApp({
+            defaultApp = admin.initializeApp({
                 credential: admin.credential.cert(serviceAccount)
             });
-            console.log('Firebase Admin SDK initialized successfully');
-            return firebaseApp;
+            console.log('Firebase Admin SDK (default) initialized successfully');
+            return defaultApp;
         } else {
             console.warn('Firebase Admin SDK not initialized: No service account credentials provided');
             return null;
         }
     } catch (error) {
-        console.error('Failed to initialize Firebase Admin SDK:', error.message);
+        console.error('Failed to initialize default Firebase Admin SDK:', error.message);
         return null;
+    }
+};
+
+/**
+ * Resolve the Firebase Admin app to send through for a tenant: its own
+ * project if Project.secrets.firebase_service_account_json is set, else the
+ * shared default app.
+ * @param {string} [projectCode]
+ * @returns {Promise<admin.app.App|null>}
+ */
+const getFirebaseApp = async (projectCode) => {
+    if (!projectCode) {
+        return initializeDefaultFirebase();
+    }
+
+    if (namedApps.has(projectCode)) {
+        return namedApps.get(projectCode);
+    }
+
+    let serviceAccountJson;
+    try {
+        const { getProjectModel } = require('../models/Project');
+        const project = await getProjectModel()
+            .findOne({ project_code: projectCode })
+            .select('+secrets.firebase_service_account_json')
+            .lean();
+        serviceAccountJson = project?.secrets?.firebase_service_account_json;
+    } catch (error) {
+        console.error(`Failed to look up Firebase config for ${projectCode}:`, error.message);
+    }
+
+    if (!serviceAccountJson) {
+        return initializeDefaultFirebase();
+    }
+
+    try {
+        const serviceAccount = JSON.parse(serviceAccountJson);
+        const app = admin.initializeApp(
+            { credential: admin.credential.cert(serviceAccount) },
+            `tenant-${projectCode}`
+        );
+        namedApps.set(projectCode, app);
+        console.log(`Firebase Admin SDK initialized for tenant ${projectCode} (project ${serviceAccount.project_id})`);
+        return app;
+    } catch (error) {
+        console.error(`Failed to initialize Firebase app for ${projectCode}:`, error.message);
+        return initializeDefaultFirebase();
     }
 };
 
@@ -35,10 +97,11 @@ const initializeFirebase = () => {
  * @param {string} title - Notification title
  * @param {string} body - Notification body
  * @param {Object} data - Optional custom data payload
+ * @param {string} [projectCode] - Tenant, to pick the right Firebase project
  * @returns {Promise<Object>} Response from FCM
  */
-const sendNotification = async (fcmToken, title, body, data = {}) => {
-    const app = initializeFirebase();
+const sendNotification = async (fcmToken, title, body, data = {}, projectCode) => {
+    const app = await getFirebaseApp(projectCode);
 
     if (!app) {
         throw new Error('Firebase Admin SDK not initialized');
@@ -87,7 +150,7 @@ const sendNotification = async (fcmToken, title, body, data = {}) => {
     };
 
     try {
-        const response = await admin.messaging().send(message);
+        const response = await app.messaging().send(message);
         console.log('Successfully sent notification:', response);
         return { success: true, messageId: response };
     } catch (error) {
@@ -102,14 +165,15 @@ const sendNotification = async (fcmToken, title, body, data = {}) => {
  * @param {string} title - Notification title
  * @param {string} body - Notification body
  * @param {Object} data - Optional custom data payload
+ * @param {string} [projectCode] - Tenant, to pick the right Firebase project
  * @returns {Promise<Object>} Response from FCM
  */
-const sendNotificationToUser = async (user, title, body, data = {}) => {
+const sendNotificationToUser = async (user, title, body, data = {}, projectCode) => {
     if (!user || !user.fcmToken) {
         throw new Error('User does not have an FCM token');
     }
 
-    return await sendNotification(user.fcmToken, title, body, data);
+    return await sendNotification(user.fcmToken, title, body, data, projectCode);
 };
 
 /**
@@ -118,10 +182,11 @@ const sendNotificationToUser = async (user, title, body, data = {}) => {
  * @param {string} title - Notification title
  * @param {string} body - Notification body
  * @param {Object} data - Optional custom data payload
+ * @param {string} [projectCode] - Tenant, to pick the right Firebase project
  * @returns {Promise<Object>} Summary of results
  */
-const sendNotificationToMultipleUsers = async (users, title, body, data = {}) => {
-    const app = initializeFirebase();
+const sendNotificationToMultipleUsers = async (users, title, body, data = {}, projectCode) => {
+    const app = await getFirebaseApp(projectCode);
 
     if (!app) {
         throw new Error('Firebase Admin SDK not initialized');
@@ -175,7 +240,7 @@ const sendNotificationToMultipleUsers = async (users, title, body, data = {}) =>
     };
 
     try {
-        const response = await admin.messaging().sendEachForMulticast(message);
+        const response = await app.messaging().sendEachForMulticast(message);
         console.log(`Successfully sent notifications: ${response.successCount}/${tokens.length}`);
 
         return {
@@ -198,14 +263,16 @@ const sendNotificationToMultipleUsers = async (users, title, body, data = {}) =>
  * @param {string} title - Notification title
  * @param {string} body - Notification body
  * @param {Object} data - Optional custom data payload
+ * @param {string} [projectCode] - Tenant, to pick the right Firebase project
  * @returns {Promise<Object>} Summary of results
  */
-const sendNotificationToAllUsers = async (users, title, body, data = {}) => {
-    return await sendNotificationToMultipleUsers(users, title, body, data);
+const sendNotificationToAllUsers = async (users, title, body, data = {}, projectCode) => {
+    return await sendNotificationToMultipleUsers(users, title, body, data, projectCode);
 };
 
 module.exports = {
-    initializeFirebase,
+    initializeFirebase: initializeDefaultFirebase,
+    getFirebaseApp,
     sendNotification,
     sendNotificationToUser,
     sendNotificationToMultipleUsers,

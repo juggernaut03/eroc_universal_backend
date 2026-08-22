@@ -51,8 +51,10 @@ const sendNotificationToUser = async (req, res) => {
             });
         }
 
-        // Send notification
-        const result = await fcm.sendNotificationToUser(user, title, body, data || {});
+        // Send notification via this tenant's own Firebase project, if it has
+        // one configured (falls back to the shared default app otherwise —
+        // see utils/fcm.js).
+        const result = await fcm.sendNotificationToUser(user, title, body, data || {}, req.tenant?.projectCode);
 
         res.status(200).json({
             success: true,
@@ -111,8 +113,9 @@ const sendNotificationToAllUsers = async (req, res) => {
             });
         }
 
-        // Send notification to all users
-        const result = await fcm.sendNotificationToAllUsers(usersWithTokens, title, body, data || {});
+        // Send notification to all users via this tenant's own Firebase
+        // project, if it has one configured.
+        const result = await fcm.sendNotificationToAllUsers(usersWithTokens, title, body, data || {}, req.tenant?.projectCode);
 
         res.status(200).json({
             success: true,
