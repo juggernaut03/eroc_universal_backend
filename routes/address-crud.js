@@ -92,16 +92,20 @@ router.post('/add-address', protect, async (req, res, next) => {
       });
     }
 
+    // Nominatim's Indian postcode centroids are too coarse to hard-block on —
+    // MyNeedMart's own registered store coordinates measured 17.8km from
+    // their own pincode's geocoded centroid, so every real address in that
+    // pincode was being rejected (12 attempts, 0 saved, before this fix).
+    // The helper's own doc says "warn", so warn: log it and let the save
+    // through rather than failing the request on a third-party geocoder's
+    // imprecision.
     const pinCheck = await validatePincodeDistance(
       resolved.latitude,
       resolved.longitude,
       delivery_addr_pincode.trim()
     );
     if (!pinCheck.ok) {
-      return res.status(400).json({
-        success: false,
-        error: pinCheck.warning,
-      });
+      console.warn(`[address-crud] add-address: ${pinCheck.warning}`);
     }
 
     // Create new address
@@ -230,16 +234,14 @@ router.put('/update-address/:id', protect, async (req, res, next) => {
       });
     }
 
+    // See the matching comment in add-address above: warn, don't reject.
     const pinCheck = await validatePincodeDistance(
       resolved.latitude,
       resolved.longitude,
       pincode
     );
     if (!pinCheck.ok) {
-      return res.status(400).json({
-        success: false,
-        error: pinCheck.warning,
-      });
+      console.warn(`[address-crud] update-address: ${pinCheck.warning}`);
     }
 
     // Update address fields
