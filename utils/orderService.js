@@ -226,13 +226,25 @@ const applyDeals = (items, dealItems, dealOffers, storeCode) => {
     orderItems = orderItems.map((item) => {
       if (item.p_code !== requested.p_code) return item;
 
+      // Only up to the deal's own max_quantity gets deal_price - a cart
+      // quantity beyond that must fall back to the item's regular price for
+      // the remainder, not get the deal price for every unit. This used to
+      // apply dealProduct.deal_price to the item's *entire* quantity
+      // regardless of qty, so e.g. a max_quantity:1 "free product" deal
+      // added at quantity 5 was charged 5 x deal_price instead of
+      // 1 x deal_price + 4 x regular price.
       const discountedQty = Math.min(item.quantity, qty);
+      const regularQty = item.quantity - discountedQty;
       savings += (item.unit_price - dealProduct.deal_price) * discountedQty;
 
       return {
         ...item,
-        unit_price: dealProduct.deal_price,
-        total_price: round2(dealProduct.deal_price * item.quantity),
+        // unit_price only cleanly represents one price per line - keep it as
+        // the deal price when every unit qualifies (the common case), else
+        // leave it at the regular price so it still means something; either
+        // way total_price below is the authoritative blended charge.
+        unit_price: regularQty === 0 ? dealProduct.deal_price : item.unit_price,
+        total_price: round2(dealProduct.deal_price * discountedQty + item.unit_price * regularQty),
       };
     });
 
