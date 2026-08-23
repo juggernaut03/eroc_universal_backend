@@ -321,6 +321,12 @@ router.get('/card', async (req, res) => {
           cardPrimaryColor: currentTier.cardPrimaryColor,
           cardAccentColor: currentTier.cardAccentColor
         } : null,
+        // Effective card colors - the current tier's colors once the
+        // customer has one, else the tenant's configured default
+        // (Admin > Loyalty > Loyalty Card). Always present so the client
+        // never needs a hardcoded fallback color of its own.
+        cardPrimaryColor: currentTier ? currentTier.cardPrimaryColor : settings.card_primary_color,
+        cardAccentColor: currentTier ? currentTier.cardAccentColor : settings.card_accent_color,
         brandTitle: settings.brand_title,
         brandSubtitle: settings.brand_subtitle,
         memberLabel: settings.member_label,

@@ -9,6 +9,13 @@ const mongoose = require('mongoose');
 // (cardPrimaryColor/cardAccentColor) instead of here, since a tenant with
 // four tiers wants four different-looking cards, not one shared color; this
 // document only holds what's the same across every tier's card.
+//
+// card_primary_color/card_accent_color below are the exception: a fallback
+// pair used only while a customer hasn't reached any tier yet (brand-new
+// account, currentTierCode still null), so the card they see on day one is
+// still tenant-configured instead of a hardcoded color baked into the
+// client. See routes/loyalty.js's GET /card for how tier colors win once a
+// tier applies.
 const benefitSchema = new mongoose.Schema({
   icon: {
     // A Flutter Material icon name the app maps to a glyph (card_giftcard,
@@ -69,6 +76,16 @@ const loyaltyCardSettingsSchema = new mongoose.Schema({
     type: String,
     trim: true,
     default: 'Terms & Conditions Apply'
+  },
+  card_primary_color: {
+    type: String,
+    trim: true,
+    default: '#1A1A1A'
+  },
+  card_accent_color: {
+    type: String,
+    trim: true,
+    default: '#D4AF37'
   }
 }, {
   timestamps: true,
