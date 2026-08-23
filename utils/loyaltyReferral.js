@@ -13,6 +13,7 @@
  * point amount for that side, for continuity with the FRD's field name.
  */
 
+const User = require('../models/User');
 const LoyaltyAccount = require('../models/LoyaltyAccount');
 const LoyaltyReferral = require('../models/LoyaltyReferral');
 const LoyaltyRule = require('../models/LoyaltyRule');
@@ -77,12 +78,16 @@ const completeReferralIfQualifying = async ({ referredUser, order, isFirstOrder,
 
   const referrerAccount = await LoyaltyAccount.findOne({ mobile: referral.referrerMobile });
   if (!referrerAccount) return null;
-  // creditPoints needs a User-shaped object (_id, mobile) - the referrer's
-  // own User doc, not their loyalty account.
-  const referrerUserRef = { _id: referrerAccount.userId, mobile: referrerAccount.mobile };
+  // The real User doc, not just {_id, mobile} - notifyLoyaltyEvent needs
+  // fcmToken to actually push, not just create the in-app row. A synthetic
+  // ref here silently dropped the push (no fcmToken to send to), so the
+  // referrer had no signal their balance had changed until they happened to
+  // pull-to-refresh - reported as "mobile shows 200, admin shows 700".
+  const referrerUser = await User.findById(referrerAccount.userId);
+  if (!referrerUser) return null;
 
   await creditPoints({
-    user: referrerUserRef,
+    user: referrerUser,
     points: referrerPoints,
     source: 'REFERRAL',
     referenceId: String(referral._id),
@@ -108,7 +113,7 @@ const completeReferralIfQualifying = async ({ referredUser, order, isFirstOrder,
   referral.completedAt = new Date();
   await referral.save();
 
-  await notifyLoyaltyEvent(referrerUserRef, {
+  await notifyLoyaltyEvent(referrerUser, {
     title: 'Referral successful! 🎉',
     body: `You earned ${referrerPoints} points for referring a friend.`,
     data: { loyaltyEventType: 'REFERRAL_SUCCESSFUL' },
