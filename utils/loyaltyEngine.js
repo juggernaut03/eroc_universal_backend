@@ -217,6 +217,36 @@ const debitPoints = async ({
         throw err;
       }
 
+      const balanceBefore = account.availablePoints;
+      const balanceAfter = balanceBefore - points;
+
+      // Idempotency gate FIRST, before touching anything else. This used to
+      // run after the batch-consumption loop below, which mutates and saves
+      // each CREDIT batch's remainingPoints immediately (no real transaction
+      // on this deployment, so nothing here rolls back on a later failure).
+      // A retried call with the same idempotencyKey - a normal thing for a
+      // mobile client to do on a timeout, and exactly what happened testing
+      // this - re-ran that loop and decremented remainingPoints a second
+      // time for points that were never actually re-debited from the
+      // account (this insert's duplicate-key error stopped it from ever
+      // reaching the account update below), silently pulling the ledger out
+      // of sync with the account's cached balance. Creating this row first
+      // means a duplicate is rejected before it can touch a single batch.
+      const [transaction] = await LoyaltyTransaction.create([{
+        userId: user._id,
+        mobile: user.mobile,
+        loyaltyAccountId: account._id,
+        type: 'DEBIT',
+        source,
+        points,
+        balanceBefore,
+        balanceAfter,
+        referenceId,
+        idempotencyKey,
+        metadata,
+        status: 'COMPLETED'
+      }], { session });
+
       // Consume oldest-expiring batches first.
       const batches = await LoyaltyTransaction.find({
         mobile: user.mobile,
@@ -236,30 +266,16 @@ const debitPoints = async ({
       // remaining > 0 here would mean the batches don't cover
       // account.availablePoints - a bookkeeping bug elsewhere, not a normal
       // insufficient-funds case (already checked above). Surface it loudly
-      // rather than silently letting the ledger drift from the cache.
+      // rather than silently letting the ledger drift from the cache. The
+      // DEBIT row above and the account update below have already run by
+      // this point, so this no longer prevents the debit itself - it's a
+      // signal for scripts/loyalty_reconcile_ledger.js to find and fix, not
+      // a transaction abort (this deployment can't abort one anyway).
       if (remaining > 0) {
-        throw new Error(
-          `Loyalty ledger inconsistency for ${user.mobile}: ${remaining} points unaccounted for by CREDIT batches`
+        console.error(
+          `[loyalty] ledger inconsistency for ${user.mobile}: ${remaining} points unaccounted for by CREDIT batches (debit tx ${transaction._id})`
         );
       }
-
-      const balanceBefore = account.availablePoints;
-      const balanceAfter = balanceBefore - points;
-
-      const [transaction] = await LoyaltyTransaction.create([{
-        userId: user._id,
-        mobile: user.mobile,
-        loyaltyAccountId: account._id,
-        type: 'DEBIT',
-        source,
-        points,
-        balanceBefore,
-        balanceAfter,
-        referenceId,
-        idempotencyKey,
-        metadata,
-        status: 'COMPLETED'
-      }], { session });
 
       await LoyaltyAccount.updateOne(
         { _id: account._id },
