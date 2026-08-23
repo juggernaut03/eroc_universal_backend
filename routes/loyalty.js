@@ -5,6 +5,7 @@ const { protect } = require('../middleware/auth');
 const LoyaltyAccount = require('../models/LoyaltyAccount');
 const LoyaltyTransaction = require('../models/LoyaltyTransaction');
 const LoyaltyReward = require('../models/LoyaltyReward');
+const LoyaltyRule = require('../models/LoyaltyRule');
 const LoyaltyRedemption = require('../models/LoyaltyRedemption');
 const LoyaltyTier = require('../models/LoyaltyTier');
 const LoyaltyChallenge = require('../models/LoyaltyChallenge');
@@ -20,6 +21,30 @@ const { applyReferralCode } = require('../utils/loyaltyReferral');
 // Every route here needs an authenticated customer/admin - loyalty balances
 // are always resolved from req.user, never a mobile passed by the client.
 router.use(protect);
+
+// Customer-facing label for an earning rule's event - distinct from the
+// admin panel's raw event name, which is meant for someone configuring
+// rules, not someone deciding how to earn points.
+const EVENT_LABELS = {
+  REGISTRATION: 'Sign Up',
+  FIRST_ORDER: 'First Order',
+  ORDER_DELIVERED: 'Shop',
+  PRODUCT_REVIEW: 'Write a Review',
+  PHOTO_REVIEW: 'Photo Review',
+  REFERRAL: 'Refer a Friend',
+  BIRTHDAY: 'Birthday',
+  FIRST_APP_ORDER: 'First App Order'
+};
+
+const formatWayToEarn = (rule) => ({
+  code: rule.code,
+  label: EVENT_LABELS[rule.event] || rule.event,
+  points: rule.pointsValue,
+  perAmount: rule.pointsType === 'FIXED_PER_AMOUNT' ? rule.amountValue : null,
+  description: rule.pointsType === 'FIXED_PER_AMOUNT'
+    ? `+${rule.pointsValue} pts / ₹${rule.amountValue}`
+    : `+${rule.pointsValue} pts`
+});
 
 const errorResponse = (res, error, fallbackStatus = 500) => {
   const codeToStatus = {
@@ -55,11 +80,12 @@ router.get('/', async (req, res) => {
     const tiers = await getActiveTiers();
     const currentTier = tiers.find((t) => t.code === account.currentTierCode) || null;
 
-    const [rewards, activeChallenges, myProgress, recentTransactions] = await Promise.all([
+    const [rewards, activeChallenges, myProgress, recentTransactions, earningRules] = await Promise.all([
       LoyaltyReward.find({ status: 'ACTIVE' }).sort({ pointsRequired: 1 }).limit(6),
       LoyaltyChallenge.find({ status: 'ACTIVE', validUntil: { $gte: new Date() } }).limit(5),
       LoyaltyChallengeProgress.find({ mobile: req.user.mobile }),
-      LoyaltyTransaction.find({ mobile: req.user.mobile }).sort({ createdAt: -1 }).limit(5)
+      LoyaltyTransaction.find({ mobile: req.user.mobile }).sort({ createdAt: -1 }).limit(5),
+      LoyaltyRule.find({ status: 'ACTIVE' }).sort({ createdAt: 1 })
     ]);
 
     const progressMap = new Map(myProgress.map((p) => [String(p.challengeId), p]));
@@ -77,6 +103,7 @@ router.get('/', async (req, res) => {
           nextTierSpend: account.tierProgress.nextTierSpend,
           progress: account.tierProgress.percentage
         } : null,
+        waysToEarn: earningRules.map(formatWayToEarn),
         rewards,
         challenges: activeChallenges.map((c) => ({
           ...c.toObject(),
@@ -211,6 +238,20 @@ router.get('/redemptions/active', async (req, res) => {
     res.status(200).json({ success: true, data: redemptions });
   } catch (error) {
     console.error('Loyalty active redemptions error:', error);
+    res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load redemptions' } });
+  }
+});
+
+// @route   GET /api/v1/loyalty/redemptions
+// @desc    Every voucher this customer has ever redeemed, any status - the
+//          "My Coupons" screen, distinct from /redemptions/active (which
+//          only has what's still usable and is what checkout reads from).
+router.get('/redemptions', async (req, res) => {
+  try {
+    const redemptions = await LoyaltyRedemption.find({ mobile: req.user.mobile }).sort({ createdAt: -1 }).limit(50);
+    res.status(200).json({ success: true, data: redemptions });
+  } catch (error) {
+    console.error('Loyalty redemptions error:', error);
     res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load redemptions' } });
   }
 });
