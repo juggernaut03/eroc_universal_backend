@@ -40,10 +40,10 @@ const DEFAULT_REWARDS = [
 ];
 
 const DEFAULT_TIERS = [
-  { code: 'BRONZE', name: 'Bronze', minimumSpend: 0, maximumSpend: 9999, pointMultiplier: 1.0, rank: 1, benefits: [{ type: 'POINT_MULTIPLIER', value: 1.0 }] },
-  { code: 'SILVER', name: 'Silver', minimumSpend: 10000, maximumSpend: 29999, pointMultiplier: 1.25, rank: 2, benefits: [{ type: 'POINT_MULTIPLIER', value: 1.25 }] },
-  { code: 'GOLD', name: 'Gold', minimumSpend: 30000, maximumSpend: 74999, pointMultiplier: 1.5, rank: 3, benefits: [{ type: 'POINT_MULTIPLIER', value: 1.5 }, { type: 'FREE_SHIPPING', value: true }, { type: 'EARLY_ACCESS', value: true }] },
-  { code: 'PLATINUM', name: 'Platinum', minimumSpend: 75000, maximumSpend: null, pointMultiplier: 2.0, rank: 4, benefits: [{ type: 'POINT_MULTIPLIER', value: 2.0 }, { type: 'FREE_SHIPPING', value: true }, { type: 'EARLY_ACCESS', value: true }, { type: 'PRIORITY_SUPPORT', value: true }] }
+  { code: 'BRONZE', name: 'Bronze', minimumSpend: 0, maximumSpend: 9999, pointMultiplier: 1.0, rank: 1, benefits: [{ type: 'POINT_MULTIPLIER', value: 1.0 }], cardPrimaryColor: '#3E2723', cardAccentColor: '#CD7F32' },
+  { code: 'SILVER', name: 'Silver', minimumSpend: 10000, maximumSpend: 29999, pointMultiplier: 1.25, rank: 2, benefits: [{ type: 'POINT_MULTIPLIER', value: 1.25 }], cardPrimaryColor: '#2C2C2C', cardAccentColor: '#C0C0C0' },
+  { code: 'GOLD', name: 'Gold', minimumSpend: 30000, maximumSpend: 74999, pointMultiplier: 1.5, rank: 3, benefits: [{ type: 'POINT_MULTIPLIER', value: 1.5 }, { type: 'FREE_SHIPPING', value: true }, { type: 'EARLY_ACCESS', value: true }], cardPrimaryColor: '#1A1A1A', cardAccentColor: '#D4AF37' },
+  { code: 'PLATINUM', name: 'Platinum', minimumSpend: 75000, maximumSpend: null, pointMultiplier: 2.0, rank: 4, benefits: [{ type: 'POINT_MULTIPLIER', value: 2.0 }, { type: 'FREE_SHIPPING', value: true }, { type: 'EARLY_ACCESS', value: true }, { type: 'PRIORITY_SUPPORT', value: true }], cardPrimaryColor: '#0D1B2A', cardAccentColor: '#E5E4E2' }
 ];
 
 async function seedProject(project) {

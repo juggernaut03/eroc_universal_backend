@@ -13,7 +13,8 @@ const loyaltyAuditLogSchema = new mongoose.Schema({
       'RULE_CREATED', 'RULE_UPDATED', 'REWARD_CREATED', 'REWARD_UPDATED',
       'REWARD_DELETED', 'TIER_CREATED', 'TIER_UPDATED', 'CAMPAIGN_CREATED',
       'CAMPAIGN_UPDATED', 'CAMPAIGN_DELETED', 'CHALLENGE_CREATED',
-      'CHALLENGE_UPDATED', 'CHALLENGE_DELETED', 'REDEMPTION_CANCELLED'
+      'CHALLENGE_UPDATED', 'CHALLENGE_DELETED', 'REDEMPTION_CANCELLED',
+      'CARD_SETTINGS_UPDATED'
     ],
     required: true
   },
@@ -22,7 +23,8 @@ const loyaltyAuditLogSchema = new mongoose.Schema({
     type: String,
     enum: [
       'LoyaltyAccount', 'LoyaltyRule', 'LoyaltyReward', 'LoyaltyTier',
-      'LoyaltyCampaign', 'LoyaltyChallenge', 'LoyaltyRedemption'
+      'LoyaltyCampaign', 'LoyaltyChallenge', 'LoyaltyRedemption',
+      'LoyaltyCardSettings'
     ],
     required: true
   },

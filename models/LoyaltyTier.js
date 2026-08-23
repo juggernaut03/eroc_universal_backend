@@ -55,6 +55,23 @@ const loyaltyTierSchema = new mongoose.Schema({
     required: true
   },
 
+  // Physical-card styling for this tier (loyalty card front/back, mobile
+  // app) - admin-configurable per tier so e.g. Gold looks distinct from
+  // Bronze, matching how real membership cards escalate visually with
+  // status. Hex colors; sane per-tier defaults are seeded by
+  // scripts/seed_loyalty_defaults.js but every tier is editable
+  // independently from Admin > Loyalty > Tiers.
+  cardPrimaryColor: {
+    type: String,
+    default: '#1A1A1A',
+    trim: true
+  },
+  cardAccentColor: {
+    type: String,
+    default: '#D4AF37',
+    trim: true
+  },
+
   status: {
     type: String,
     enum: ['ACTIVE', 'INACTIVE'],

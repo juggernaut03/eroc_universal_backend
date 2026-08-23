@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const router = express.Router();
 const { protect } = require('../middleware/auth');
 
@@ -11,6 +12,7 @@ const LoyaltyTier = require('../models/LoyaltyTier');
 const LoyaltyChallenge = require('../models/LoyaltyChallenge');
 const LoyaltyChallengeProgress = require('../models/LoyaltyChallengeProgress');
 const LoyaltyReferral = require('../models/LoyaltyReferral');
+const LoyaltyCardSettings = require('../models/LoyaltyCardSettings');
 
 const { getOrCreateAccount } = require('../utils/loyaltyEngine');
 const { getActiveTiers } = require('../utils/loyaltyTierEngine');
@@ -45,6 +47,16 @@ const formatWayToEarn = (rule) => ({
     ? `+${rule.pointsValue} pts / ₹${rule.amountValue}`
     : `+${rule.pointsValue} pts`
 });
+
+// A stable, unique-looking "card number" derived from the customer's
+// mobile - not a real identifier (never stored, never used to look anything
+// up), purely cosmetic for the loyalty card display. Deterministic so it
+// never changes between requests without needing a DB field/migration.
+const cardNumberFor = (mobile) => {
+  const hash = crypto.createHash('sha256').update(`${mobile}:loyalty-card`).digest('hex');
+  const digits = (BigInt(`0x${hash.slice(0, 16)}`) % 1000000000000n).toString().padStart(12, '0');
+  return `${digits.slice(0, 4)} ${digits.slice(4, 8)} ${digits.slice(8, 12)}`;
+};
 
 const errorResponse = (res, error, fallbackStatus = 500) => {
   const codeToStatus = {
@@ -281,6 +293,47 @@ router.get('/tiers', async (req, res) => {
   } catch (error) {
     console.error('Loyalty tiers error:', error);
     res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load tiers' } });
+  }
+});
+
+// @route   GET /api/v1/loyalty/card
+// @desc    Everything the membership card (front + back) needs: this
+//          customer's name/number/tier styling, plus the tenant-wide card
+//          content configured in Admin > Loyalty > Loyalty Card.
+router.get('/card', async (req, res) => {
+  try {
+    const account = await getOrCreateAccount(req.user);
+    const [tiers, settingsDoc] = await Promise.all([
+      getActiveTiers(),
+      LoyaltyCardSettings.findOne({})
+    ]);
+    const currentTier = tiers.find((t) => t.code === account.currentTierCode) || null;
+    const settings = settingsDoc || new LoyaltyCardSettings();
+
+    res.status(200).json({
+      success: true,
+      data: {
+        memberName: req.user.name || req.user.mobile,
+        memberNumber: `${settings.card_number_prefix} ${cardNumberFor(req.user.mobile)}`,
+        tier: currentTier ? {
+          code: currentTier.code,
+          name: currentTier.name,
+          cardPrimaryColor: currentTier.cardPrimaryColor,
+          cardAccentColor: currentTier.cardAccentColor
+        } : null,
+        brandTitle: settings.brand_title,
+        brandSubtitle: settings.brand_subtitle,
+        memberLabel: settings.member_label,
+        thankYouMessage: settings.thank_you_message,
+        benefits: settings.benefits,
+        supportPhone: settings.support_phone,
+        website: settings.website,
+        termsText: settings.terms_text
+      }
+    });
+  } catch (error) {
+    console.error('Loyalty card error:', error);
+    res.status(500).json({ success: false, error: { code: 'INTERNAL_ERROR', message: 'Failed to load loyalty card' } });
   }
 });
 

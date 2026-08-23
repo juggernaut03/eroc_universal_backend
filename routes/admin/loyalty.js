@@ -12,6 +12,7 @@ const LoyaltyCampaign = require('../../models/LoyaltyCampaign');
 const LoyaltyChallenge = require('../../models/LoyaltyChallenge');
 const LoyaltyReferral = require('../../models/LoyaltyReferral');
 const LoyaltyAuditLog = require('../../models/LoyaltyAuditLog');
+const LoyaltyCardSettings = require('../../models/LoyaltyCardSettings');
 const User = require('../../models/User');
 
 const { creditPoints, debitPoints } = require('../../utils/loyaltyEngine');
@@ -201,6 +202,41 @@ router.put('/tiers/:id', checkPermission('loyalty', 'edit'), async (req, res) =>
     const tier = await LoyaltyTier.findByIdAndUpdate(req.params.id, req.body, { new: true, runValidators: true });
     await writeAuditLog({ action: 'TIER_UPDATED', targetType: 'LoyaltyTier', targetId: req.params.id, performedBy: req.user._id, before: before.toObject(), after: tier.toObject() });
     res.status(200).json({ success: true, data: tier });
+  } catch (error) {
+    res.status(400).json({ success: false, message: error.message });
+  }
+});
+
+// ---------------------------------------------------------------------
+// Loyalty Card (tenant-wide content; per-tier colors live on /tiers above)
+// ---------------------------------------------------------------------
+
+router.get('/card-settings', checkPermission('loyalty', 'view'), async (req, res) => {
+  try {
+    const settings = await LoyaltyCardSettings.findOne({});
+    res.status(200).json({ success: true, data: settings || new LoyaltyCardSettings().toObject() });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+});
+
+router.put('/card-settings', checkPermission('loyalty', 'edit'), async (req, res) => {
+  try {
+    const before = await LoyaltyCardSettings.findOne({});
+    const settings = await LoyaltyCardSettings.findOneAndUpdate(
+      {},
+      { $set: req.body },
+      { new: true, upsert: true, setDefaultsOnInsert: true, runValidators: true }
+    );
+    await writeAuditLog({
+      action: 'CARD_SETTINGS_UPDATED',
+      targetType: 'LoyaltyCardSettings',
+      targetId: String(settings._id),
+      performedBy: req.user._id,
+      before: before ? before.toObject() : null,
+      after: settings.toObject()
+    });
+    res.status(200).json({ success: true, data: settings });
   } catch (error) {
     res.status(400).json({ success: false, message: error.message });
   }
