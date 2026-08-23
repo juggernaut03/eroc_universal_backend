@@ -158,6 +158,7 @@ cartSchema.statics.clearCart = function (mobileNo) {
 // Instance method to validate cart items against current product data
 cartSchema.methods.validateItems = async function () {
   const ProductMaster = require('./ProductMaster');
+  const Offer = require('./Offer');
   const validationResults = {
     valid: true,
     invalidItems: [],
@@ -165,6 +166,37 @@ cartSchema.methods.validateItems = async function () {
     totalValidItems: 0,
     totalInvalidItems: 0
   };
+
+  // Active product_deal offers for this cart's store, keyed by p_code - lets
+  // the price check below recognize a legitimately deal-priced item instead
+  // of flagging it as stale just because it doesn't match ProductMaster's
+  // catalog price (a deal price never will, by design). Eligibility mirrors
+  // utils/orderService.js's applyDeals() exactly (active + date window +
+  // store_codes + min_cart_value against the non-deal subtotal), so this
+  // pre-checkout validation agrees with what order placement will actually
+  // charge - a deal that's no longer eligible (e.g. the qualifying items
+  // were removed) still correctly falls through to a real price-changed flag.
+  const now = new Date();
+  const dealOffers = await Offer.find({
+    offer_type: 'product_deal',
+    is_active: true,
+    valid_from: { $lte: now },
+    $or: [{ valid_until: null }, { valid_until: { $gte: now } }]
+  });
+
+  const dealPriceByPCode = new Map();
+  for (const offer of dealOffers) {
+    if (offer.store_codes?.length > 0 && !offer.store_codes.includes(this.store_code)) continue;
+    for (const dp of offer.deal_products || []) {
+      if (!dealPriceByPCode.has(dp.p_code)) {
+        dealPriceByPCode.set(dp.p_code, { offer, dealProduct: dp });
+      }
+    }
+  }
+
+  const nonDealSubtotal = this.items
+    .filter((item) => !dealPriceByPCode.has(item.p_code))
+    .reduce((sum, item) => sum + item.total_price, 0);
 
   // Helper function to format product data for frontend
   const formatProductData = (product) => {
@@ -224,10 +256,27 @@ cartSchema.methods.validateItems = async function () {
 
       // Format current product data
       const currentProductData = formatProductData(currentProduct);
-      const currentPrice = parseFloat(currentProduct.our_price?.toString() || '0');
+      let currentPrice = parseFloat(currentProduct.our_price?.toString() || '0');
       const currentStock = currentProduct.store_quantity || 0;
       const maxAllowed = currentProduct.max_quantity_allowed || null;
       const requestedQuantity = cartItem.quantity;
+
+      // This item's stored price is the deal price of a still-eligible
+      // product_deal - treat that as "current" instead of the catalog price
+      // so every price check below (out-of-stock/insufficient-stock/
+      // max-quantity reports, and the plain price-changed check further
+      // down) agrees it hasn't actually changed.
+      const dealEntry = dealPriceByPCode.get(cartItem.p_code);
+      if (
+        dealEntry &&
+        Math.abs(cartItem.unit_price - dealEntry.dealProduct.deal_price) < 0.01 &&
+        nonDealSubtotal >= dealEntry.offer.min_cart_value
+      ) {
+        // Snap to cartItem.unit_price itself (not dealProduct.deal_price) so
+        // every downstream `currentPrice !== cartItem.unit_price` below is an
+        // exact match rather than reintroducing a float-rounding mismatch.
+        currentPrice = cartItem.unit_price;
+      }
 
       // Track if item has issues
       let itemHasIssues = false;
