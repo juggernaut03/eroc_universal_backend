@@ -47,6 +47,18 @@ const storeSchema = new mongoose.Schema({
     type: String,
     default: 'Day + 1 day'
   },
+  // How many days from today delivery slots start being offered - 0 =
+  // same-day, 1 = next-day only, 2 = day after tomorrow, etc. Distinct from
+  // store_delivery_time above, which is free-text display copy the app
+  // never parses; this is the actual number the checkout date picker uses
+  // to decide which dates to show (see routes/stores.js's /by-pincode and
+  // the mobile app's delivery_slot_service.dart).
+  delivery_start_offset_days: {
+    type: Number,
+    default: 0,
+    min: [0, 'Delivery start offset cannot be negative'],
+    max: [7, 'Delivery start offset cannot exceed 7 days']
+  },
   store_offer_name: {
     type: String,
     trim: true

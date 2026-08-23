@@ -71,6 +71,7 @@ router.post('/by-pincode', async (req, res, next) => {
       min_order_amount: store.min_order_amount,
       store_open_time: store.store_open_time,
       delivery_time: store.store_delivery_time,
+      delivery_start_offset_days: store.delivery_start_offset_days ?? 0,
       offer: store.store_offer_name,
       location: {
         latitude: store.latitude,
