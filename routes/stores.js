@@ -79,7 +79,8 @@ router.post('/by-pincode', async (req, res, next) => {
       },
       delivery_options: {
         home_delivery: store.home_delivery === 'yes',
-        self_pickup: store.self_pickup === 'yes'
+        self_pickup: store.self_pickup === 'yes',
+        packing_fee_enabled_for_pickup: store.packing_fee_enabled_for_pickup === true
       },
       contact: {
         phone: store.contact_number,

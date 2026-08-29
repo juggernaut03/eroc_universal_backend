@@ -115,32 +115,27 @@ const deliveryInfoSchema = new mongoose.Schema({
   },
   delivery_address: {
     full_name: {
-      type: String,
-      required: [true, 'Delivery full name is required']
+      type: String
     },
     mobile_number: {
-      type: String,
-      required: [true, 'Delivery mobile number is required']
+      type: String
     },
     email_id: {
       type: String,
       default: ''
     },
     line_1: {
-      type: String,
-      required: [true, 'Delivery address line 1 is required']
+      type: String
     },
     line_2: {
       type: String,
       trim: true
     },
     city: {
-      type: String,
-      required: [true, 'Delivery city is required']
+      type: String
     },
     pincode: {
-      type: String,
-      required: [true, 'Delivery pincode is required']
+      type: String
     },
     latitude: {
       type: String,
@@ -217,6 +212,11 @@ const orderSchema = new mongoose.Schema({
     set: (value) => LEGACY_STATUS_MAP[value] || value,
     default: ORDER_STATUS.PENDING
   },
+  fulfillment_type: {
+    type: String,
+    enum: ['delivery', 'pickup'],
+    default: 'delivery'
+  },
   order_items: [orderItemSchema],
   delivery_info: deliveryInfoSchema,
   payment_info: paymentInfoSchema,
@@ -234,6 +234,11 @@ const orderSchema = new mongoose.Schema({
     delivery_distance_km: {
       type: Number,
       default: 0
+    },
+    packing_fee: {
+      type: Number,
+      default: 0,
+      min: [0, 'Packing fee cannot be negative']
     },
     tax_amount: {
       type: Number,

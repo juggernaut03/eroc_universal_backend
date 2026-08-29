@@ -15,9 +15,10 @@ const { CANCELLABLE_STATUSES } = require('../constants/orderStatus');
  * @access  Private (requires JWT token)
  * @body    {
  *   "store_code": "PAG001",
+ *   "fulfillment_type": "delivery",  // or "pickup" — defaults to "delivery"
  *   "delivery_slot_id": 1,
  *   "delivery_date": "2026-08-15",
- *   "address_id": "68f9fcfaa8873e89d5faf4f9",
+ *   "address_id": "68f9fcfaa8873e89d5faf4f9",  // required unless fulfillment_type is "pickup"
  *   "payment_mode_id": 2,
  *   "order_notes": "Please handle with care",
  *   "offer_id": "...",            // optional
@@ -86,12 +87,15 @@ router.post('/place-order', protect, async (req, res, next) => {
         order_placed_at: savedOrder.order_placed_at,
         estimated_delivery_date: savedOrder.estimated_delivery_date,
         delivery_slot: `${savedOrder.delivery_info.delivery_slot_from} - ${savedOrder.delivery_info.delivery_slot_to}`,
-        delivery_address: {
-          full_name: savedOrder.delivery_info.delivery_address.full_name,
-          line_1: savedOrder.delivery_info.delivery_address.line_1,
-          city: savedOrder.delivery_info.delivery_address.city,
-          pincode: savedOrder.delivery_info.delivery_address.pincode
-        },
+        fulfillment_type: savedOrder.fulfillment_type,
+        delivery_address: savedOrder.delivery_info.delivery_address
+          ? {
+              full_name: savedOrder.delivery_info.delivery_address.full_name,
+              line_1: savedOrder.delivery_info.delivery_address.line_1,
+              city: savedOrder.delivery_info.delivery_address.city,
+              pincode: savedOrder.delivery_info.delivery_address.pincode
+            }
+          : null,
         payment_mode: savedOrder.payment_info.payment_mode_name,
         payment_status: savedOrder.payment_info.payment_status,
         order_summary: savedOrder.order_summary,
@@ -140,12 +144,15 @@ router.get('/my-orders', protect, async (req, res, next) => {
       estimated_delivery_date: order.estimated_delivery_date,
       actual_delivery_date: order.actual_delivery_date,
       delivery_slot: `${order.delivery_info.delivery_slot_from} - ${order.delivery_info.delivery_slot_to}`,
-      delivery_address: {
-        full_name: order.delivery_info.delivery_address.full_name,
-        line_1: order.delivery_info.delivery_address.line_1,
-        city: order.delivery_info.delivery_address.city,
-        pincode: order.delivery_info.delivery_address.pincode
-      },
+      fulfillment_type: order.fulfillment_type,
+      delivery_address: order.delivery_info.delivery_address
+        ? {
+            full_name: order.delivery_info.delivery_address.full_name,
+            line_1: order.delivery_info.delivery_address.line_1,
+            city: order.delivery_info.delivery_address.city,
+            pincode: order.delivery_info.delivery_address.pincode
+          }
+        : null,
       payment_mode: order.payment_info.payment_mode_name,
       payment_status: order.payment_info.payment_status,
       order_summary: order.order_summary,
@@ -202,6 +209,7 @@ router.get('/:orderNumber', protect, async (req, res, next) => {
       order: {
         order_number: order.order_number,
         order_status: order.order_status,
+        fulfillment_type: order.fulfillment_type,
         order_placed_at: order.order_placed_at,
         order_confirmed_at: order.order_confirmed_at,
         order_completed_at: order.order_completed_at,

@@ -149,6 +149,13 @@ const storeSchema = new mongoose.Schema({
     type: Number,
     default: 0,
     min: [0, 'Package fee cannot be negative']
+  },
+  // Gates whether package_fee is charged on self-pickup orders. Delivery
+  // orders are unaffected by this flag — package_fee there is always part of
+  // calculateDeliveryCharge's total (see utils/distanceCalculation.js).
+  packing_fee_enabled_for_pickup: {
+    type: Boolean,
+    default: false
   }
 }, {
   timestamps: true,

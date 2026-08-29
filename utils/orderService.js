@@ -442,6 +442,7 @@ const runAtomically = async (work) => {
 const placeOrder = async ({ user, body, project }) => {
   const {
     store_code,
+    fulfillment_type,
     delivery_slot_id,
     delivery_date,
     address_id,
@@ -453,13 +454,19 @@ const placeOrder = async ({ user, body, project }) => {
     loyalty_redemption_id,
   } = body || {};
 
+  const normalizedFulfillmentType = (fulfillment_type || 'delivery').toString().trim().toLowerCase();
+  if (!['delivery', 'pickup'].includes(normalizedFulfillmentType)) {
+    throw new OrderError("fulfillment_type must be 'delivery' or 'pickup'");
+  }
+  const isPickup = normalizedFulfillmentType === 'pickup';
+
   // --- Required selectors (note: no amounts, and no cart_validated flag) ---
   if (!store_code || String(store_code).trim() === '') {
     throw new OrderError('store_code is required');
   }
   if (!delivery_slot_id) throw new OrderError('delivery_slot_id is required');
   if (!delivery_date) throw new OrderError('delivery_date is required');
-  if (!address_id) throw new OrderError('address_id is required');
+  if (!isPickup && !address_id) throw new OrderError('address_id is required');
   if (!payment_mode_id) throw new OrderError('payment_mode_id is required');
 
   const storeCode = String(store_code).trim();
@@ -479,7 +486,7 @@ const placeOrder = async ({ user, body, project }) => {
       is_active: 'yes',
     }),
     PaymentMode.findOne({ idpayment_mode: payment_mode_id, is_enabled: 'Yes' }),
-    AddressBook.findById(address_id),
+    isPickup ? Promise.resolve(null) : AddressBook.findById(address_id),
   ]);
 
   if (!deliverySlot) {
@@ -488,11 +495,13 @@ const placeOrder = async ({ user, body, project }) => {
   if (!paymentMode) {
     throw new OrderError('Invalid payment mode or payment mode not available');
   }
-  if (!deliveryAddress) {
-    throw new OrderError('Delivery address not found');
-  }
-  if (deliveryAddress.mobile_number !== userMobile) {
-    throw new OrderError('You can only use your own addresses for delivery', 403);
+  if (!isPickup) {
+    if (!deliveryAddress) {
+      throw new OrderError('Delivery address not found');
+    }
+    if (deliveryAddress.mobile_number !== userMobile) {
+      throw new OrderError('You can only use your own addresses for delivery', 403);
+    }
   }
 
   // --- Loyalty reward voucher, if the customer picked one at checkout ---
@@ -557,12 +566,25 @@ const placeOrder = async ({ user, body, project }) => {
   const cartOffer = offer_id ? await Offer.findById(offer_id) : null;
   const { discountAmount, appliedOffer } = applyCartOffer(cartOffer, subtotal, storeCode);
 
-  // --- Delivery charge, recomputed (client value ignored) ---
-  const { charges: deliveryCharges, distanceKm } = await resolveDeliveryCharges(
-    storeCode,
-    deliveryAddress,
-    subtotal
-  );
+  // --- Delivery/packing charge, recomputed (client value ignored) ---
+  let deliveryCharges = 0;
+  let distanceKm = 0;
+  let packingFee = 0;
+
+  if (isPickup) {
+    const pickupStore = await Store.findOne({ store_code: storeCode }).lean();
+    if (!pickupStore) {
+      throw new OrderError(`Store not found: ${storeCode}`, 404);
+    }
+    if (pickupStore.self_pickup !== 'yes') {
+      throw new OrderError('Self pickup is not available at this store', 400);
+    }
+    packingFee = pickupStore.packing_fee_enabled_for_pickup ? round2(pickupStore.package_fee || 0) : 0;
+  } else {
+    const result = await resolveDeliveryCharges(storeCode, deliveryAddress, subtotal);
+    deliveryCharges = result.charges;
+    distanceKm = result.distanceKm;
+  }
 
   // --- Loyalty reward voucher discount, computed server-side against the
   // now-known subtotal/delivery charges - never trust a client-supplied
@@ -592,7 +614,7 @@ const placeOrder = async ({ user, body, project }) => {
   // Tax is inside `subtotal`, so it is reported, not added. Adding it here is
   // what made the payable total disagree with the amount the shopper was shown
   // and actually paid — see the note on TAX_RATE.
-  const totalAmount = round2(subtotal + deliveryCharges - totalDiscount);
+  const totalAmount = round2(subtotal + deliveryCharges + packingFee - totalDiscount);
   const taxAmount = includedTax(subtotal - totalDiscount);
 
   // --- Payment, verified against the gateway ---
@@ -615,24 +637,27 @@ const placeOrder = async ({ user, body, project }) => {
     store_code: storeCode,
     // Tenancy comes from the resolved tenant, not from the request body.
     project_code: project?.project_code || '',
+    fulfillment_type: normalizedFulfillmentType,
     order_items: orderItems,
     delivery_info: {
       delivery_date: deliveryDateObj,
       delivery_slot_id: deliverySlot.iddelivery_slot,
       delivery_slot_from: deliverySlot.delivery_slot_from,
       delivery_slot_to: deliverySlot.delivery_slot_to,
-      delivery_address: {
-        full_name: deliveryAddress.full_name,
-        mobile_number: deliveryAddress.mobile_number,
-        email_id: deliveryAddress.email_id,
-        line_1: deliveryAddress.delivery_addr_line_1,
-        line_2: deliveryAddress.delivery_addr_line_2,
-        city: deliveryAddress.delivery_addr_city,
-        pincode: deliveryAddress.delivery_addr_pincode,
-        latitude: deliveryAddress.latitude,
-        longitude: deliveryAddress.longitude,
-        area_id: deliveryAddress.area_id,
-      },
+      ...(isPickup ? {} : {
+        delivery_address: {
+          full_name: deliveryAddress.full_name,
+          mobile_number: deliveryAddress.mobile_number,
+          email_id: deliveryAddress.email_id,
+          line_1: deliveryAddress.delivery_addr_line_1,
+          line_2: deliveryAddress.delivery_addr_line_2,
+          city: deliveryAddress.delivery_addr_city,
+          pincode: deliveryAddress.delivery_addr_pincode,
+          latitude: deliveryAddress.latitude,
+          longitude: deliveryAddress.longitude,
+          area_id: deliveryAddress.area_id,
+        },
+      }),
     },
     payment_info: {
       payment_mode_id: paymentMode.idpayment_mode,
@@ -647,6 +672,7 @@ const placeOrder = async ({ user, body, project }) => {
       subtotal,
       delivery_charges: deliveryCharges,
       delivery_distance_km: distanceKm,
+      packing_fee: packingFee,
       tax_amount: taxAmount,
       discount_amount: totalDiscount,
       total_amount: totalAmount,

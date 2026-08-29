@@ -4,12 +4,17 @@ const Store = require('../models/Store');
 const { calculateDistance, calculateDeliveryCharge, buildStoreDeliveryConfig, isValidCoordinate } = require('../utils/distanceCalculation');
 
 // @route   POST /api/delivery-charges/calculate
-// @desc    Calculate delivery distance and charges
+// @desc    Calculate delivery distance and charges. Accepts an optional
+//          fulfillment_type: 'pickup' mode, which needs no coordinates and
+//          returns only the store's packing fee (mirrors the pickup branch
+//          in utils/orderService.js's placeOrder, so the pre-order estimate
+//          shown at checkout agrees with what placeOrder actually charges).
 // @access  Public
 router.post('/calculate', async (req, res) => {
   try {
     const {
       store_code,
+      fulfillment_type,
       address_latitude,
       address_longitude,
       address_pincode,
@@ -21,6 +26,55 @@ router.post('/calculate', async (req, res) => {
       return res.status(400).json({
         success: false,
         error: 'store_code is required'
+      });
+    }
+
+    const isPickup = (fulfillment_type || 'delivery').toString().trim().toLowerCase() === 'pickup';
+
+    if (isPickup) {
+      const pickupStore = await Store.findOne({ store_code: store_code.trim() }).lean();
+      if (!pickupStore) {
+        return res.status(404).json({ success: false, error: `Store not found: ${store_code}` });
+      }
+      if (pickupStore.self_pickup !== 'yes') {
+        return res.status(200).json({
+          success: true,
+          data: {
+            delivery_available: false,
+            fulfillment_type: 'pickup',
+            distance_km: 0,
+            delivery_charge: 0,
+            distance_charge: 0,
+            handling_fee: 0,
+            package_fee: 0,
+            packing_fee: 0,
+            packing_fee_enabled: false,
+            total_charges: 0,
+            free_delivery: false,
+            reason: 'Self pickup is not available at this store',
+          },
+        });
+      }
+      const packingFeeEnabled = pickupStore.packing_fee_enabled_for_pickup === true;
+      const packingFee = packingFeeEnabled ? Math.max(0, Number(pickupStore.package_fee) || 0) : 0;
+      return res.status(200).json({
+        success: true,
+        data: {
+          delivery_available: true,
+          fulfillment_type: 'pickup',
+          distance_km: 0,
+          delivery_charge: packingFee,
+          distance_charge: 0,
+          handling_fee: 0,
+          package_fee: 0,
+          packing_fee: packingFee,
+          packing_fee_enabled: packingFeeEnabled,
+          total_charges: packingFee,
+          free_delivery: false,
+          reason: packingFeeEnabled
+            ? 'Packing fee applies to self-pickup orders'
+            : 'No packing fee for self-pickup orders',
+        },
       });
     }
 
