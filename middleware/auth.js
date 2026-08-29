@@ -74,6 +74,17 @@ const protect = async (req, res, next) => {
         });
       }
 
+      // Checked on every authenticated request, not just at login, so a block
+      // applied by a super admin takes effect immediately on tokens already in
+      // the wild rather than when they happen to expire.
+      if (user.isBlocked) {
+        return res.status(403).json({
+          success: false,
+          message: 'Your account has been blocked. Please contact support.',
+          code: 'ACCOUNT_BLOCKED'
+        });
+      }
+
       req.user = user;
       next();
 
@@ -127,7 +138,7 @@ const optionalAuth = async (req, res, next) => {
 
         const user = await findUserById(decoded.id);
 
-        if (user && user.isVerified) {
+        if (user && user.isVerified && !user.isBlocked) {
           req.user = user;
         }
       } catch (error) {

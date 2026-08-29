@@ -196,6 +196,16 @@ const adminLogin = async (req, res) => {
       return invalid();
     }
 
+    // Checked after the password so a blocked admin learns nothing about
+    // which mobile numbers exist that a wrong password wouldn't already tell.
+    if (user.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been blocked. Please contact a super admin.',
+        code: 'ACCOUNT_BLOCKED'
+      });
+    }
+
     // Password login proves account ownership, so an admin who never went
     // through the OTP flow still satisfies the isVerified check in protect().
     if (!user.isVerified) {
@@ -273,7 +283,17 @@ const sendOtp = async (req, res) => {
 
     // Find or create user
     // We still ensure user exists in DB, even if we don't store OTP there
-    await User.findOrCreateByMobile(mobile);
+    const otpUser = await User.findOrCreateByMobile(mobile);
+
+    // Refuse before the SMS goes out - verify-otp would reject the login
+    // anyway, so sending the code only spends money and misleads the user.
+    if (otpUser.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been blocked. Please contact support.',
+        code: 'ACCOUNT_BLOCKED'
+      });
+    }
 
     // Send valid OTP via SMS Gateway
     const smsResponse = await sms.sendOtp(mobile);
@@ -327,6 +347,14 @@ const verifyOtp = async (req, res) => {
       return res.status(404).json({
         success: false,
         message: 'User not found. Please request OTP first.'
+      });
+    }
+
+    if (user.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been blocked. Please contact support.',
+        code: 'ACCOUNT_BLOCKED'
       });
     }
 
@@ -554,6 +582,16 @@ const refreshToken = async (req, res) => {
       return res.status(401).json({
         success: false,
         message: 'Refresh token is invalid or expired'
+      });
+    }
+
+    // Blocking clears stored refresh tokens, so this normally never fires -
+    // it covers a token minted in the same instant the block was applied.
+    if (user.isBlocked) {
+      return res.status(403).json({
+        success: false,
+        message: 'Your account has been blocked. Please contact support.',
+        code: 'ACCOUNT_BLOCKED'
       });
     }
 

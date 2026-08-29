@@ -53,6 +53,28 @@ const userSchema = new mongoose.Schema({
     type: Boolean,
     default: false
   },
+  // Account block. Only a super admin can set this (see routes/admin/users.js).
+  // A blocked account keeps all of its data — orders, addresses, loyalty — but
+  // cannot log in and is rejected on every authenticated request, so an
+  // already-issued token stops working the moment the block lands.
+  isBlocked: {
+    type: Boolean,
+    default: false
+  },
+  blockedAt: {
+    type: Date,
+    default: null
+  },
+  blockedReason: {
+    type: String,
+    default: null
+  },
+  // The super admin who applied the current block.
+  blockedBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    default: null
+  },
   // Tenant scoping for admins: project codes this admin may operate on.
   // Super admins ignore this (access to every project). Customers never use it.
   allowed_project_codes: {

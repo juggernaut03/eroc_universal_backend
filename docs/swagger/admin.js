@@ -138,8 +138,11 @@
  *   delete:
  *     tags:
  *       - Admin - Users
- *     summary: Delete user
- *     description: Deletes a user (prevents deletion if user has active orders)
+ *     summary: Delete user (super admin only)
+ *     description: >
+ *       Permanently deletes a user. Restricted to super admins - the
+ *       `users.delete` permission does not grant it. Refused if the user has
+ *       active orders, is a super admin, or is the caller's own account.
  *     security:
  *       - bearerAuth: []
  *     parameters:
@@ -152,7 +155,72 @@
  *       200:
  *         description: User deleted successfully
  *       400:
- *         description: Cannot delete user with active orders
+ *         description: Cannot delete user with active orders, or own account
+ *       403:
+ *         description: Super admin access required, or target is a super admin
+ *       404:
+ *         description: User not found
+ *
+ * @swagger
+ * /api/admin/users/{id}/block:
+ *   patch:
+ *     tags:
+ *       - Admin - Users
+ *     summary: Block user (super admin only)
+ *     description: >
+ *       Blocks a user: every live session is revoked, sign-in is refused and
+ *       any access token already issued stops working on its next request.
+ *       All of the user's data is retained. Super admins only.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reason:
+ *                 type: string
+ *                 description: Optional note stored as blockedReason
+ *     responses:
+ *       200:
+ *         description: User blocked successfully
+ *       400:
+ *         description: User already blocked, or own account
+ *       403:
+ *         description: Super admin access required, or target is a super admin
+ *       404:
+ *         description: User not found
+ *
+ * @swagger
+ * /api/admin/users/{id}/unblock:
+ *   patch:
+ *     tags:
+ *       - Admin - Users
+ *     summary: Unblock user (super admin only)
+ *     description: Lifts a block so the user can sign in again. Super admins only.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: User unblocked successfully
+ *       400:
+ *         description: User is not blocked
+ *       403:
+ *         description: Super admin access required
  *       404:
  *         description: User not found
  *

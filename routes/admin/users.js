@@ -10,7 +10,7 @@ const Cart = require('../../models/Cart');
 // (collection `productmasters`, keyed by p_code) - not the unused legacy
 // Product model, which has no data in any live tenant.
 const ProductMaster = require('../../models/ProductMaster');
-const { checkPermission } = require('../../middleware/checkPermission');
+const { checkPermission, requireSuperAdmin } = require('../../middleware/checkPermission');
 const { ORDER_STATUS } = require('../../constants/orderStatus');
 
 // Statuses that mean an order is still "in flight" for a customer -
@@ -321,9 +321,14 @@ router.put('/:id', checkPermission('users', 'edit'), async (req, res) => {
 });
 
 // @route   DELETE /api/admin/users/:id
-// @desc    Delete user (soft delete by deactivating)
-// @access  Admin
-router.delete('/:id', checkPermission('users', 'delete'), async (req, res) => {
+// @desc    Delete a user permanently
+// @access  Super admin only
+//
+// Deleting an account is irreversible and takes the customer's identity with
+// it, so it is not delegated through the `users.delete` permission the way
+// every other destructive action in this file is - only a super admin may do
+// it. Blocking (below) is the reversible alternative.
+router.delete('/:id', requireSuperAdmin, async (req, res) => {
   try {
     const user = await User.findById(req.params.id);
 
@@ -331,6 +336,22 @@ router.delete('/:id', checkPermission('users', 'delete'), async (req, res) => {
       return res.status(404).json({
         success: false,
         message: 'User not found'
+      });
+    }
+
+    if (user._id.toString() === req.user._id.toString()) {
+      return res.status(400).json({
+        success: false,
+        message: 'You cannot delete your own account'
+      });
+    }
+
+    // A super admin is the only account that can undo any of this; letting one
+    // delete another leaves no way back if it was the last one.
+    if (user.isSuperAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'Super admin accounts cannot be deleted'
       });
     }
 
@@ -359,6 +380,126 @@ router.delete('/:id', checkPermission('users', 'delete'), async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error deleting user',
+      error: error.message
+    });
+  }
+});
+
+// @route   PATCH /api/admin/users/:id/block
+// @desc    Block a user - they can no longer sign in, and any token they
+//          already hold stops working on the next request (middleware/auth.js).
+// @access  Super admin only
+router.patch('/:id/block', requireSuperAdmin, async (req, res) => {
+  try {
+    const { reason } = req.body || {};
+
+    const user = await User.findById(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    if (user._id.toString() === req.user._id.toString()) {
+      return res.status(400).json({
+        success: false,
+        message: 'You cannot block your own account'
+      });
+    }
+
+    if (user.isSuperAdmin) {
+      return res.status(403).json({
+        success: false,
+        message: 'Super admin accounts cannot be blocked'
+      });
+    }
+
+    if (user.isBlocked) {
+      return res.status(400).json({
+        success: false,
+        message: 'User is already blocked'
+      });
+    }
+
+    // An update rather than doc.save(): save() revalidates the whole document,
+    // and long-lived customer records predate some of the current field
+    // validators - blocking must not fail because of an unrelated legacy value.
+    //
+    // Clearing refreshTokens kills every live session outright; otherwise the
+    // account keeps valid refresh tokens and could mint fresh access tokens on
+    // a device that is mid-refresh.
+    const blocked = await User.findByIdAndUpdate(
+      user._id,
+      {
+        $set: {
+          isBlocked: true,
+          blockedAt: new Date(),
+          blockedReason: typeof reason === 'string' && reason.trim() ? reason.trim() : null,
+          blockedBy: req.user._id,
+          refreshTokens: []
+        }
+      },
+      { new: true }
+    )
+      .select('-otp -otpExpiresAt')
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      message: 'User blocked successfully',
+      data: blocked
+    });
+  } catch (error) {
+    console.error('Block user error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error blocking user',
+      error: error.message
+    });
+  }
+});
+
+// @route   PATCH /api/admin/users/:id/unblock
+// @desc    Lift a block and let the user sign in again
+// @access  Super admin only
+router.patch('/:id/unblock', requireSuperAdmin, async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: 'User not found'
+      });
+    }
+
+    if (!user.isBlocked) {
+      return res.status(400).json({
+        success: false,
+        message: 'User is not blocked'
+      });
+    }
+
+    const unblocked = await User.findByIdAndUpdate(
+      user._id,
+      { $set: { isBlocked: false, blockedAt: null, blockedReason: null, blockedBy: null } },
+      { new: true }
+    )
+      .select('-otp -otpExpiresAt')
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      message: 'User unblocked successfully',
+      data: unblocked
+    });
+  } catch (error) {
+    console.error('Unblock user error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error unblocking user',
       error: error.message
     });
   }
