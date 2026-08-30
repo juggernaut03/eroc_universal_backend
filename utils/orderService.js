@@ -44,7 +44,6 @@ const TAX_RATE = 0.18; // 18% GST, included in the price
 
 /// The GST already contained in a tax-inclusive [amount].
 const includedTax = (amount) => round2((amount * TAX_RATE) / (1 + TAX_RATE));
-const ORDER_NUMBER_RETRIES = 5;
 
 // Payment modes whose name implies the money is collected up front. There is no
 // is_online flag on the PaymentMode model, so this is name-based.
@@ -688,57 +687,35 @@ const placeOrder = async ({ user, body, project }) => {
   });
 
   // --- Persist: order + cart clear, atomically ---
-  // generateOrderNumber reads the last order and adds one, so two concurrent
-  // orders can pick the same number. The unique index catches it; retry.
-  let lastError;
+  // generateOrderNumber reserves the number atomically (Counter.getNextSequence's
+  // findOneAndUpdate+$inc+upsert), so two concurrent orders can no longer
+  // collide the way the old "find the last order and add one" scheme could —
+  // no retry loop needed here.
+  const orderNumber = await Order.generateOrderNumber();
 
-  for (let attempt = 0; attempt < ORDER_NUMBER_RETRIES; attempt += 1) {
-    try {
-      /* eslint-disable no-await-in-loop */
-      return await runAtomically(async (session) => {
-        const orderNumber = await Order.generateOrderNumber();
-        const order = new Order(buildOrder(orderNumber));
+  return runAtomically(async (session) => {
+    const order = new Order(buildOrder(orderNumber));
 
-        const savedOrder = await order.save({ session });
+    const savedOrder = await order.save({ session });
 
-        if (loyaltyRedemption) {
-          await markRedemptionUsed(loyaltyRedemption, savedOrder._id, session);
-        }
-
-        await Cart.updateOne(
-          { mobile_no: userMobile },
-          {
-            items: [],
-            subtotal: 0,
-            total_items: 0,
-            total_quantity: 0,
-            last_updated: new Date(),
-          },
-          { session }
-        );
-
-        return savedOrder;
-      });
-      /* eslint-enable no-await-in-loop */
-    } catch (error) {
-      const isDuplicateOrderNumber =
-        error.code === 11000 &&
-        (error.keyPattern?.order_number || /order_number/.test(error.message || ''));
-
-      if (!isDuplicateOrderNumber) {
-        throw error;
-      }
-
-      lastError = error;
-      console.warn(`Order number collision (attempt ${attempt + 1}), retrying.`);
+    if (loyaltyRedemption) {
+      await markRedemptionUsed(loyaltyRedemption, savedOrder._id, session);
     }
-  }
 
-  throw new OrderError(
-    'Could not allocate an order number. Please try again.',
-    503,
-    lastError?.message
-  );
+    await Cart.updateOne(
+      { mobile_no: userMobile },
+      {
+        items: [],
+        subtotal: 0,
+        total_items: 0,
+        total_quantity: 0,
+        last_updated: new Date(),
+      },
+      { session }
+    );
+
+    return savedOrder;
+  });
 };
 
 module.exports = {

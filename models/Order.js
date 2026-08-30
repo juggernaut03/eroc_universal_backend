@@ -342,25 +342,21 @@ orderSchema.index({ 'delivery_info.delivery_date': 1 });
 orderSchema.index({ mobile_no: 1, order_status: 1 });
 orderSchema.index({ mobile_no: 1, 'order_placed_at': -1 });
 
-// Static method to generate order number
+// Static method to generate order number.
+//
+// A single global counter per tenant DB (models/Counter.js — the same
+// findOneAndUpdate+$inc+upsert primitive already used for AddressBook ids),
+// not scoped by store or date, so numbers are unique across every store in
+// the tenant and never reset. This replaced a "find the last order and add
+// one" scheme: two concurrent placeOrder calls could read the same "last"
+// order and compute the same next number, relying on the unique index plus
+// a retry loop in utils/orderService.js to paper over the collision.
+// $inc/upsert is atomic at the document level, so that race can't happen and
+// the retry loop is no longer needed there.
 orderSchema.statics.generateOrderNumber = async function() {
-  const date = new Date();
-  const year = date.getFullYear().toString().slice(-2);
-  const month = (date.getMonth() + 1).toString().padStart(2, '0');
-  const day = date.getDate().toString().padStart(2, '0');
-
-  // Find the last order for today
-  const lastOrder = await this.findOne({
-    order_number: new RegExp(`^ORD${year}${month}${day}`)
-  }).sort({ order_number: -1 });
-
-  let sequence = 1;
-  if (lastOrder) {
-    const lastSequence = parseInt(lastOrder.order_number.slice(-4));
-    sequence = lastSequence + 1;
-  }
-
-  return `ORD${year}${month}${day}${sequence.toString().padStart(4, '0')}`;
+  const Counter = require('./Counter');
+  const nextSequence = await Counter.getNextSequence('order_number');
+  return nextSequence.toString().padStart(4, '0');
 };
 
 // Static method to find orders by mobile number
