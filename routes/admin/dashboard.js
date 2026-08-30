@@ -68,8 +68,7 @@ router.get('/overview', async (req, res) => {
         $in: [
           ...LEGACY_STATUS_ALIASES[ORDER_STATUS.PENDING],
           ...LEGACY_STATUS_ALIASES[ORDER_STATUS.ACCEPTED],
-          ...LEGACY_STATUS_ALIASES[ORDER_STATUS.ACCEPTED_BY_STORE],
-          ORDER_STATUS.PAYMENT_PROCESSING
+          ...LEGACY_STATUS_ALIASES[ORDER_STATUS.ACCEPTED_BY_STORE]
         ]
       }
     });

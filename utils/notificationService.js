@@ -50,7 +50,6 @@ const createOrderStatusNotification = async (userId, orderNumber, newStatus) => 
             'in_packaging': 'Your order is being packed and will be dispatched soon!',
             'out_for_delivery': 'Your order is on its way! 🚚',
             'delivered': 'Your order has been delivered! Thank you for shopping with us. 🎉',
-            'payment_processing': 'We are confirming your payment.',
             'cancelled': 'Your order has been cancelled.'
         };
 
@@ -61,7 +60,6 @@ const createOrderStatusNotification = async (userId, orderNumber, newStatus) => 
             'in_packaging': '📦',
             'out_for_delivery': '🚚',
             'delivered': '🎉',
-            'payment_processing': '💳',
             'cancelled': '❌'
         };
 

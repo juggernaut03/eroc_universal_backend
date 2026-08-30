@@ -1,9 +1,15 @@
 // Order status vocabulary.
 //
-// These are the eight buckets the admin panel exposes as tabs, matching the
-// legacy Shalvi admin panel one-for-one. Every order sits in exactly one of
-// them — the tab queries below are mutually exclusive by construction, so an
-// accepted order never also shows up under Pending.
+// These are the seven buckets the admin panel exposes as tabs. Every order
+// sits in exactly one of them — the tab queries below are mutually exclusive
+// by construction, so an accepted order never also shows up under Pending.
+//
+// There used to be an eighth, Payment Processing. It was never a value any
+// code wrote: it was a view over prepaid orders whose payment had not settled
+// (order_status still pending, payment_info.payment_status 'processing'), and
+// Pending had to exclude those to stop them being counted twice. Removed on
+// request — such an order now simply sits in Pending like any other unhandled
+// order, and its payment state is visible in the Payment Status column.
 //
 // The values replace an older vocabulary (placed / confirmed / processing /
 // packed / shipped / refunded). LEGACY_STATUS_ALIASES keeps documents written
@@ -17,7 +23,6 @@ const ORDER_STATUS = {
   IN_PACKAGING: 'in_packaging',
   OUT_FOR_DELIVERY: 'out_for_delivery',
   DELIVERED: 'delivered',
-  PAYMENT_PROCESSING: 'payment_processing',
   CANCELLED: 'cancelled',
 };
 
@@ -29,7 +34,6 @@ const ORDER_STATUSES = [
   ORDER_STATUS.IN_PACKAGING,
   ORDER_STATUS.OUT_FOR_DELIVERY,
   ORDER_STATUS.DELIVERED,
-  ORDER_STATUS.PAYMENT_PROCESSING,
   ORDER_STATUS.CANCELLED,
 ];
 
@@ -42,6 +46,11 @@ const LEGACY_STATUS_MAP = {
   packed: ORDER_STATUS.IN_PACKAGING,
   shipped: ORDER_STATUS.OUT_FOR_DELIVERY,
   refunded: ORDER_STATUS.CANCELLED,
+  // Retired. No code ever wrote it, but an order carrying it (from another
+  // environment, or a client pinned to an older build) still has to resolve:
+  // listing it here keeps it valid on the model enum, folds it to Pending on
+  // read, and makes the Order setter rewrite it to pending on any save.
+  payment_processing: ORDER_STATUS.PENDING,
 };
 
 // Current value -> every stored value that means it (current + legacy).
@@ -81,32 +90,15 @@ function normalizeStatus(status) {
 /**
  * Mongo query fragment selecting exactly the orders belonging to one tab.
  *
- * Payment Processing is the only bucket that is not a plain status match: it
- * holds prepaid orders whose payment has not been confirmed yet. Those orders
- * are still `pending` as far as the pipeline is concerned, so Pending has to
- * exclude them explicitly — otherwise they would be counted under both tabs.
+ * Every bucket is now a plain status match. Pending used to carry an extra
+ * `payment_info.payment_status: { $ne: 'processing' }` so that a prepaid order
+ * mid-payment showed under Payment Processing instead of under both tabs. With
+ * that tab gone the exclusion has to go too — left in place it would match no
+ * tab at all and the order would be invisible in the panel rather than merely
+ * in the wrong one.
  */
 function buildStatusQuery(status) {
   if (!status) return {};
-
-  if (status === ORDER_STATUS.PAYMENT_PROCESSING) {
-    return {
-      $or: [
-        { order_status: ORDER_STATUS.PAYMENT_PROCESSING },
-        {
-          order_status: { $in: LEGACY_STATUS_ALIASES[ORDER_STATUS.PENDING] },
-          'payment_info.payment_status': 'processing',
-        },
-      ],
-    };
-  }
-
-  if (status === ORDER_STATUS.PENDING) {
-    return {
-      order_status: { $in: LEGACY_STATUS_ALIASES[ORDER_STATUS.PENDING] },
-      'payment_info.payment_status': { $ne: 'processing' },
-    };
-  }
 
   return { order_status: { $in: LEGACY_STATUS_ALIASES[status] || [status] } };
 }
