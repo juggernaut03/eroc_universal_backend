@@ -5,7 +5,7 @@ const ProductMaster = require('../../models/ProductMaster');
 const Subcategory = require('../../models/Subcategory');
 const SubcategoryProductMap = require('../../models/SubcategoryProductMap');
 const { checkPermission } = require('../../middleware/checkPermission');
-const { attachSubscription, requireActiveSubscription, enforceProductLimit } = require('../../middleware/subscription');
+const { enforceProductLimit } = require('../../middleware/subscription');
 
 const viewPerm = checkPermission('ecommerce', 'view');
 const createPerm = checkPermission('ecommerce', 'create');
@@ -294,7 +294,7 @@ router.get('/:id', viewPerm, async (req, res) => {
 // @route   POST /api/admin/products
 // @desc    Create new product
 // @access  Admin
-router.post('/', createPerm, attachSubscription, requireActiveSubscription, enforceProductLimit(), async (req, res) => {
+router.post('/', createPerm, enforceProductLimit(), async (req, res) => {
   try {
     const productData = {
       ...req.body,
@@ -655,7 +655,7 @@ router.post('/bulk-update-status', editPerm, async (req, res) => {
 // @route   POST /api/admin/products/master
 // @desc    Create new ProductMaster entry
 // @access  Admin (ecommerce:create)
-router.post('/master', createPerm, attachSubscription, requireActiveSubscription, enforceProductLimit(), async (req, res) => {
+router.post('/master', createPerm, enforceProductLimit(), async (req, res) => {
   try {
     const product = await ProductMaster.create(req.body);
 

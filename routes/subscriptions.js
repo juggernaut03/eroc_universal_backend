@@ -4,6 +4,7 @@ const { requireSuperAdmin } = require('../middleware/checkPermission');
 const { getProjectModel } = require('../models/Project');
 const { getSubscriptionModel } = require('../models/Subscription');
 const { getEffectiveSubscription, computeSubscriptionStatus, countTenantProducts } = require('../utils/subscription');
+const { invalidateSubscriptionCache } = require('../middleware/subscription');
 
 const router = express.Router();
 
@@ -137,6 +138,8 @@ router.post('/admin/:projectCode', requireSuperAdmin, async (req, res) => {
       created_by_email: req.user.email || '',
     });
 
+    invalidateSubscriptionCache(projectCode);
+
     res.status(201).json({
       success: true,
       message: 'Subscription created successfully',
@@ -183,6 +186,7 @@ router.put('/admin/:projectCode/:subId', requireSuperAdmin, async (req, res) => 
     if (notes !== undefined) subscription.notes = notes;
 
     await subscription.save();
+    invalidateSubscriptionCache(subscription.project_code);
 
     res.status(200).json({
       success: true,
@@ -222,6 +226,7 @@ router.post('/admin/:projectCode/:subId/cancel', requireSuperAdmin, async (req, 
     subscription.cancelled_at = new Date();
     subscription.cancelled_by_name = req.user.name || '';
     await subscription.save();
+    invalidateSubscriptionCache(subscription.project_code);
 
     res.status(200).json({
       success: true,

@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const { protect, authorize } = require('../middleware/auth');
 const { requireProjectAccess } = require('../middleware/checkPermission');
+const { attachSubscription, requireActiveSubscription } = require('../middleware/subscription');
 
 // Import admin sub-routes
 const userAdminRoutes = require('./admin/users');
@@ -23,10 +24,20 @@ const reportsAdminRoutes = require('./admin/reports');
 const loyaltyAdminRoutes = require('./admin/loyalty');
 
 // All admin routes require authentication, admin role, and access to the
-// project (tenant) the request is bound to
+// project (tenant) the request is bound to.
+//
+// The subscription gate is mounted here, once, rather than on individual
+// routes: when a tenant's subscription has expired its admins lose the whole
+// panel API — orders, status changes, reports, content, everything — not just
+// the ability to create a product. Super admins are exempt (see the
+// middleware), and this covers /api/admin only, so login (/api/auth) and the
+// subscription status endpoint (/api/subscriptions/status) stay reachable and
+// the panel can still tell a locked-out admin why.
 router.use(protect);
 router.use(authorize('admin'));
 router.use(requireProjectAccess);
+router.use(attachSubscription);
+router.use(requireActiveSubscription);
 
 // Mount admin sub-routes
 router.use('/users', userAdminRoutes);
