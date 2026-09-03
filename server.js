@@ -84,6 +84,7 @@ const onboardingRoutes = require('./routes/onboarding');
 const homeRoutes = require('./routes/home');
 const homeAnalyticsRoutes = require('./routes/home-analytics');
 const loyaltyRoutes = require('./routes/loyalty');
+const subscriptionRoutes = require('./routes/subscriptions');
 
 const app = express();
 const PORT = process.env.PORT || 5001;
@@ -283,6 +284,7 @@ app.use('/api/project-config', projectConfigRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/faqs', faqRoutes);
 app.use('/api/projects', projectsRoutes);
+app.use('/api/subscriptions', subscriptionRoutes);
 // Tight per-account limits on the endpoints that accept a secret. Registered
 // before the /api/auth mount so they run first; express.json() has already
 // populated req.body by this point, which the key generator needs.
