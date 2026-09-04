@@ -62,7 +62,15 @@ require('../models/Subcategory');
 require('../models/ProductMaster');
 
 const PROJECT_CODE = 'RET2690';
-const STORE_CODE = 'SMM001';
+// Matches the Store record (models/Store.js, collection pincodestoremasters)
+// the client/admin created for this tenant — was briefly SMM001 at first
+// import, retagged to SMM on 2026-09-04 to match the real Store row rather
+// than creating a second one. Keep this in sync with whatever store_code
+// that Store document actually uses, or a re-run will silently split the
+// catalog across two store codes again (invisible in the admin panel, which
+// only ever queries by-store for the store_code selected from that
+// dropdown).
+const STORE_CODE = 'SMM';
 
 const DEFAULT_CAT_CSV =
   '/Users/gauravpawar/Downloads/Universal_Setup/Databases/Shree_Mega_mart_product_category_master_1CDN_final.csv';
