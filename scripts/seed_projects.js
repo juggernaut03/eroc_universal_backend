@@ -70,6 +70,17 @@ const PROJECTS = [
     status: 'active',
     config: { app_name: 'Sansar Pariwar', currency: 'INR' },
   },
+  {
+    // Catalog built by scripts/onboard_shree_mega_mart.js from the client's
+    // two CSV exports. Store ops (pincodes served, delivery slots, payment
+    // modes, a physical store record) intentionally not set up yet — the
+    // CSVs only carried a product catalog.
+    project_code: 'RET2690',
+    client_name: 'Shree Mega Mart',
+    db_name: 'ShreeMegaMart_DB',
+    status: 'active',
+    config: { app_name: 'Shree Mega Mart', currency: 'INR' },
+  },
 ];
 
 const seed = async () => {
