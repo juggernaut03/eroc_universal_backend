@@ -81,6 +81,16 @@ const userSchema = new mongoose.Schema({
     type: [String],
     default: []
   },
+  // Gate for the image-CDN tools (barcode-image pool, per-tenant sync, manual
+  // upload). Deliberately separate from `isSuperAdmin` and from `permissions`:
+  // every other permission check in this file bypasses for isSuperAdmin (see
+  // middleware/checkPermission.js), but this feature is meant to stay
+  // invisible to most super admins too — set by hand, per admin, by whoever
+  // already manages admin accounts.
+  imageCdnAccess: {
+    type: Boolean,
+    default: false
+  },
   permissions: {
     dashboard: {
       view: { type: Boolean, default: false }

@@ -243,7 +243,12 @@ const adminLogin = async (req, res) => {
           isVerified: user.isVerified,
           isSuperAdmin: user.isSuperAdmin || false,
           allowed_project_codes: user.allowed_project_codes || [],
-          permissions: user.permissions || {}
+          permissions: user.permissions || {},
+          // Deliberately NOT folded into isSuperAdmin — see
+          // middleware/checkPermission.js#requireImageCdnAccess. Most super
+          // admins should not see the image-CDN tools; this is granted
+          // per-admin, not implied by role.
+          imageCdnAccess: user.imageCdnAccess || false
         }
       }
     });

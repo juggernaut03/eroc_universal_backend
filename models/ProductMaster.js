@@ -75,7 +75,15 @@ const productMasterSchema = new mongoose.Schema({
     required: [true, 'Max quantity allowed is required'],
     default: 10
   },
+  // Both populated by the image-CDN sync engine (utils/imageSync.js), never
+  // hand-typed and never a guessed formula — empty until a sync has actually
+  // copied a matching file into this tenant's public store. That's also what
+  // "missing" means for this tenant: pcode_img not set.
   pcode_img: {
+    type: String,
+    trim: true
+  },
+  pcode_img_2: {
     type: String,
     trim: true
   },

@@ -22,6 +22,7 @@ const onboardingAdminRoutes = require('./admin/onboarding');
 const homeSectionAdminRoutes = require('./admin/home-sections');
 const reportsAdminRoutes = require('./admin/reports');
 const loyaltyAdminRoutes = require('./admin/loyalty');
+const imageCdnAdminRoutes = require('./admin/image-cdn');
 
 // All admin routes require authentication, admin role, and access to the
 // project (tenant) the request is bound to.
@@ -57,5 +58,6 @@ router.use('/onboarding', onboardingAdminRoutes);
 router.use('/home-sections', homeSectionAdminRoutes);
 router.use('/reports', reportsAdminRoutes);
 router.use('/loyalty', loyaltyAdminRoutes);
+router.use('/image-cdn', imageCdnAdminRoutes);
 
 module.exports = router;
