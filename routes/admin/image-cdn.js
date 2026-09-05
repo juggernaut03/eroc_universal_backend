@@ -49,7 +49,10 @@ router.get('/missing', async (req, res, next) => {
   try {
     const { projectCode } = req.tenant;
     const ProductMaster = req.tenant.db.models.ProductMaster;
-    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 1000);
+    // Capped well above any real catalog size so the admin UI's CSV export
+    // (which asks for everything, not just a page) gets the full list in
+    // one call rather than needing pagination.
+    const limit = Math.min(parseInt(req.query.limit, 10) || 200, 10000);
 
     const missing = await ProductMaster.find({
       project_code: projectCode,
