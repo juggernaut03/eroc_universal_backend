@@ -62,15 +62,24 @@ require('../models/Subcategory');
 require('../models/ProductMaster');
 
 const PROJECT_CODE = 'RET2690';
-// Matches the Store record (models/Store.js, collection pincodestoremasters)
-// the client/admin created for this tenant — was briefly SMM001 at first
-// import, retagged to SMM on 2026-09-04 to match the real Store row rather
-// than creating a second one. Keep this in sync with whatever store_code
-// that Store document actually uses, or a re-run will silently split the
-// catalog across two store codes again (invisible in the admin panel, which
-// only ever queries by-store for the store_code selected from that
-// dropdown).
-const STORE_CODE = 'SMM';
+// store_code is no longer hardcoded here — it comes from the product
+// master CSV's own BR_CODE column (the client's real branch code), one per
+// product row. History: this was hardcoded first as 'SMM001' (this
+// session's own guess), then 'SMM' (to match a Store record the admin had
+// already created by hand), and finally replaced 2026-09-05 with BR_CODE
+// once the client confirmed BR_CODE *is* the store/branch code — for this
+// export every row's BR_CODE is 'BHANPURI', a single-store CSV, so this
+// still resolves to one store_code, just sourced from the data instead of
+// invented. If a future export ever carries more than one distinct BR_CODE,
+// this script will need each Category to point at one store_code the same
+// way products already do (Category.store_code is currently one value per
+// category, not per product — see the categories.set(...) block below).
+// Keep whatever store_code(s) resolve here in sync with the real Store
+// documents (models/Store.js, collection pincodestoremasters) — the admin
+// panel's Categories/Subcategories/Products pages gate on a store_code
+// dropdown populated from Store.find(), so drift between the two is
+// invisible in the UI (hit once already, see the memory file for this
+// tenant).
 
 const DEFAULT_CAT_CSV =
   '/Users/gauravpawar/Downloads/Universal_Setup/Databases/Shree_Mega_mart_product_category_master_1CDN_final.csv';
@@ -150,6 +159,7 @@ function loadProductMasterRows(csvPath) {
       productName: (r[idx.product_name] || '').trim(),
       packageSize: (r[idx.package_size] || '').trim(),
       brandName: (r[idx.BRAND_NAME] || '').trim(),
+      storeCode: (r[idx.BR_CODE] || '').trim(),
       ourPrice: (r[idx.our_price] || '').trim(),
       productMrp: (r[idx.product_mrp] || '').trim(),
       quantity: (r[idx.quantity] || '').trim(),
@@ -164,6 +174,7 @@ function buildCatalog(catRows, prodByPcode) {
   const products = [];
   const excludedNoProduct = [];
   const excludedBadPackage = [];
+  const storeCodeCounts = new Map(); // BR_CODE -> how many products carried it
   const PACKAGE_RE = /^([0-9.]+)\s*([A-Za-z]+)$/;
 
   for (const row of catRows) {
@@ -212,6 +223,9 @@ function buildCatalog(catRows, prodByPcode) {
       continue;
     }
 
+    const storeCode = prod.storeCode || null;
+    if (storeCode) storeCodeCounts.set(storeCode, (storeCodeCounts.get(storeCode) || 0) + 1);
+
     products.push({
       p_code: row.pcode,
       barcode: prod.barcode || undefined,
@@ -221,7 +235,7 @@ function buildCatalog(catRows, prodByPcode) {
       product_mrp: prod.productMrp,
       our_price: prod.ourPrice,
       brand_name: prod.brandName || undefined,
-      store_code: STORE_CODE,
+      store_code: storeCode,
       pcode_status: prod.status === 'N' ? 'N' : 'Y',
       dept_id: deptId,
       category_id: cat.idcategory_master,
@@ -231,7 +245,7 @@ function buildCatalog(catRows, prodByPcode) {
     });
   }
 
-  return { departments, categories, subcategories, products, excludedNoProduct, excludedBadPackage };
+  return { departments, categories, subcategories, products, excludedNoProduct, excludedBadPackage, storeCodeCounts };
 }
 
 async function run() {
@@ -248,8 +262,20 @@ async function run() {
 
   console.log(`📄 Parsed ${catRows.length} category-master row(s), ${prodRows.length} product-master row(s)`);
 
-  const { departments, categories, subcategories, products, excludedNoProduct, excludedBadPackage } =
+  const { departments, categories, subcategories, products, excludedNoProduct, excludedBadPackage, storeCodeCounts } =
     buildCatalog(catRows, prodByPcode);
+
+  const distinctStoreCodes = [...storeCodeCounts.keys()];
+  if (distinctStoreCodes.length === 0) {
+    console.error('\n❌ No BR_CODE value found on any product row — cannot resolve a store_code. Check the product master CSV has a BR_CODE column.');
+    process.exit(1);
+  }
+  // Category.store_code is one value per category (see models/Category.js),
+  // not per product, so when BR_CODE varies we fall back to whichever code
+  // covers the most products for the categories — every product still keeps
+  // its own row's real BR_CODE regardless.
+  const STORE_CODE = distinctStoreCodes.sort((a, b) => storeCodeCounts.get(b) - storeCodeCounts.get(a))[0];
+  console.log(`\n🏪 Store code (from BR_CODE): ${STORE_CODE}${distinctStoreCodes.length > 1 ? ` — dominant of ${distinctStoreCodes.length} distinct codes seen: ${JSON.stringify(Object.fromEntries(storeCodeCounts))}` : ''}`);
 
   console.log(`\n📊 Resolved:`);
   console.log(`   ${departments.size} department(s)`);
