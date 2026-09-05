@@ -81,6 +81,15 @@ const PROJECT_CODE = 'RET2690';
 // invisible in the UI (hit once already, see the memory file for this
 // tenant).
 
+// Product image CDN convention: https://retailmagic.in/cdn/<project_code>/<p_code>_1.webp
+// The "_1" suffix is mandatory (first/primary image for that pcode) — this
+// is a plain formula, not a stored-per-product value, so it's derived at
+// import time from the pcode we already have rather than read from the CSV
+// (neither CSV carries an image column despite the category-master file's
+// name — "..._1CDN_final.csv" — implying otherwise).
+const CDN_BASE_URL = 'https://retailmagic.in/cdn';
+const buildPcodeImg = (projectCode, pcode) => `${CDN_BASE_URL}/${projectCode}/${pcode}_1.webp`;
+
 const DEFAULT_CAT_CSV =
   '/Users/gauravpawar/Downloads/Universal_Setup/Databases/Shree_Mega_mart_product_category_master_1CDN_final.csv';
 const DEFAULT_PROD_CSV =
@@ -235,6 +244,7 @@ function buildCatalog(catRows, prodByPcode) {
       product_mrp: prod.productMrp,
       our_price: prod.ourPrice,
       brand_name: prod.brandName || undefined,
+      pcode_img: buildPcodeImg(PROJECT_CODE, row.pcode),
       store_code: storeCode,
       pcode_status: prod.status === 'N' ? 'N' : 'Y',
       dept_id: deptId,
