@@ -1,9 +1,21 @@
+const os = require('os');
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 
 const { requireImageCdnAccess } = require('../../middleware/checkPermission');
 const { upload } = require('../../config/mediaStorage');
-const { syncProject, uploadPoolImage } = require('../../utils/imageSync');
+const { syncProject, uploadPoolImage, bulkAddToPool } = require('../../utils/imageSync');
+
+// Separate multer instance from config/mediaStorage's — bulk pool uploads
+// can be dozens of files at once, too many to hold in memory together, so
+// these land on disk (OS temp dir) and are streamed into the pool one at a
+// time (see bulkAddToPool), each temp file removed as soon as it's read.
+const bulkUpload = multer({
+  storage: multer.diskStorage({ destination: (req, file, cb) => cb(null, os.tmpdir()) }),
+  limits: { fileSize: 10 * 1024 * 1024, files: 25 },
+  fileFilter: (req, file, cb) => cb(null, file.mimetype.startsWith('image/'))
+});
 
 // Every route here needs the dedicated imageCdnAccess flag — NOT covered by
 // the isSuperAdmin bypass every other admin route gets (see
@@ -140,6 +152,32 @@ router.post('/upload', upload.single('image'), async (req, res, next) => {
     });
 
     res.json({ success: true, message: `Image saved for ${pcode}`, data: result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/admin/image-cdn/pool/bulk-upload — multipart, field "images"
+// (up to 25 files per call — the admin panel chunks a larger batch into
+// several of these). Adds straight to the shared pool, tenant-agnostic —
+// this is the "restock the pool" action, not tied to whichever project_code
+// happens to be selected. Each file must already be named <barcode>_1.<ext>
+// (or _2, or bare <barcode>.<ext>) by whoever supplied the photos; nothing
+// here copies into any tenant's public folder — run "Sync now" per tenant
+// afterwards to pick up newly-added barcodes.
+router.post('/pool/bulk-upload', bulkUpload.array('images', 25), async (req, res, next) => {
+  try {
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ success: false, message: 'No image files were uploaded' });
+    }
+
+    const { saved, skipped } = await bulkAddToPool(req.files);
+
+    res.json({
+      success: true,
+      message: `Added ${saved.length} image(s) to the pool${skipped.length ? `, ${skipped.length} skipped` : ''}`,
+      data: { saved, skipped }
+    });
   } catch (error) {
     next(error);
   }

@@ -125,30 +125,47 @@ async function syncProject(projectCode, { triggeredBy, triggeredByEmail } = {}) 
   };
 }
 
+// Only safe pool filename characters — a barcode becomes part of a real
+// path.join() below, so this also doubles as the path-traversal guard (no
+// "/", no "..", nothing that isn't a plain barcode-shaped token).
+const SAFE_BARCODE_RE = /^[A-Za-z0-9_.-]+$/;
+
+// Converts one input (a Buffer, or a path to an already-written temp file —
+// sharp accepts either) to webp and writes it into the pool as
+// <barcode>_<suffix>.webp. Shared by the single-image admin upload and the
+// bulk pool-upload path below, so both go through the same conversion.
+async function writeWebpToPool(barcode, suffix, input) {
+  await ensureDir(POOL_ROOT);
+  const poolPath = path.join(POOL_ROOT, `${barcode}_${suffix}.webp`);
+
+  if (sharp) {
+    await sharp(input, { failOn: 'none' })
+      .rotate()
+      .resize({ width: 1600, withoutEnlargement: true })
+      .webp({ quality: 82 })
+      .toFile(poolPath);
+  } else {
+    // Without sharp installed, write/copy the raw bytes under a .webp name —
+    // degrades gracefully rather than blocking the upload entirely.
+    if (typeof input === 'string') {
+      await fs.promises.copyFile(input, poolPath);
+    } else {
+      await fs.promises.writeFile(poolPath, input);
+    }
+  }
+
+  return poolPath;
+}
+
 // Converts an uploaded buffer to webp and writes it into the pool as
 // <barcode>_<suffix>.webp, then immediately copies it into the one tenant
-// folder the admin is working in — this is the "manual backfill" path
-// (§07 of the plan: missing images are closed by hand, not blocked on).
+// folder the admin is working in — this is the single-image manual backfill
+// path (§07 of the plan: missing images are closed by hand, not blocked on).
 async function uploadPoolImage({ barcode, suffix, buffer, projectCode, pcode }) {
   if (!barcode) throw new Error('barcode is required');
   if (![1, 2].includes(suffix)) throw new Error('suffix must be 1 or 2');
 
-  await ensureDir(POOL_ROOT);
-
-  let webpBuffer = buffer;
-  if (sharp) {
-    webpBuffer = await sharp(buffer, { failOn: 'none' })
-      .rotate()
-      .resize({ width: 1600, withoutEnlargement: true })
-      .webp({ quality: 82 })
-      .toBuffer();
-  }
-  // Without sharp installed, the raw buffer is written under a .webp name —
-  // degrades gracefully (browsers are lenient about content vs. extension)
-  // rather than blocking the upload entirely.
-
-  const poolPath = path.join(POOL_ROOT, `${barcode}_${suffix}.webp`);
-  await fs.promises.writeFile(poolPath, webpBuffer);
+  const poolPath = await writeWebpToPool(barcode, suffix, buffer);
 
   let publicUrl = null;
   if (projectCode && pcode) {
@@ -167,4 +184,59 @@ async function uploadPoolImage({ barcode, suffix, buffer, projectCode, pcode }) 
   return { pool_path: poolPath, url: publicUrl };
 }
 
-module.exports = { syncProject, uploadPoolImage, findPoolFile, buildImageUrl };
+// A pool filename is <barcode>_1 / <barcode>_2 / bare <barcode> (mirrors the
+// three shapes findPoolFile() already reads — see its comment). Bulk-uploaded
+// files are expected to already be named this way by whoever's handling the
+// photography (the same convention as the seeded pool), so this just reads
+// the barcode/suffix back out of the name the admin gave the file, rather
+// than asking them to enter it by hand for every file in a batch.
+function parsePoolFilename(originalname) {
+  const stem = originalname.replace(/\.[^./\\]+$/, '').trim();
+  const suffixMatch = /^(.+)_([12])$/.exec(stem);
+  const barcode = suffixMatch ? suffixMatch[1] : stem;
+  const suffix = suffixMatch ? Number(suffixMatch[2]) : 1;
+
+  if (!barcode || !SAFE_BARCODE_RE.test(barcode)) {
+    return null;
+  }
+  return { barcode, suffix };
+}
+
+// Bulk pool add: many files in one call, each named <barcode>_1.<ext> (or
+// _2, or bare <barcode>.<ext>) by whoever supplied them. Adds to the shared
+// pool only — it does NOT copy into any tenant's public folder, since the
+// pool is tenant-agnostic; run "Sync now" per tenant afterwards to pick up
+// whatever these newly-added barcodes match. `files` is multer's disk-stored
+// file list ({ path, originalname }); each temp file is removed once
+// processed, matched or not.
+async function bulkAddToPool(files) {
+  const saved = [];
+  const skipped = [];
+
+  for (const file of files) {
+    const parsed = parsePoolFilename(file.originalname);
+    try {
+      if (!parsed) {
+        skipped.push({ filename: file.originalname, reason: 'Could not read a barcode from this filename' });
+        continue;
+      }
+      await writeWebpToPool(parsed.barcode, parsed.suffix, file.path);
+      saved.push({ filename: file.originalname, barcode: parsed.barcode, suffix: parsed.suffix });
+    } catch (err) {
+      skipped.push({ filename: file.originalname, reason: err.message });
+    } finally {
+      await fs.promises.unlink(file.path).catch(() => {});
+    }
+  }
+
+  return { saved, skipped };
+}
+
+module.exports = {
+  syncProject,
+  uploadPoolImage,
+  bulkAddToPool,
+  parsePoolFilename,
+  findPoolFile,
+  buildImageUrl
+};
