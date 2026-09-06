@@ -271,7 +271,17 @@ async function generateCrossTenantSuggestions(projectCode, { deepseekApiKey } = 
 const IMAGE_URL_RE = /https?:\/\/\S+\.(?:jpg|jpeg|png|webp)\b/i;
 
 async function findImageUrlViaGemini(product, apiKey) {
-  const prompt = `Find a real product photo image URL for this Indian retail item: barcode ${product.barcode}, ${product.product_name}. Reply with ONLY the exact direct image URL (ending in .jpg/.png/.webp), or NONE_FOUND if you cannot find one.`;
+  // Deliberately NOT including the barcode: caught live (FOGG ABSOLUTE
+  // SPRAY 120ML, p_code 12149) where the stored barcode's brand_name
+  // ("STREAX") didn't match the product name at all — a real client-data
+  // mismatch, same class of issue documented throughout this catalog's
+  // onboarding. Including that wrong barcode made Gemini report NONE_FOUND;
+  // the identical prompt with just the product name found a correct image
+  // on the first try. The product name is the reliable signal the web is
+  // actually indexed by — the barcode is this catalog's least trustworthy
+  // field, so it doesn't belong in a search query where a wrong value can
+  // only ever hurt, never help.
+  const prompt = `Find a real product photo image URL for this Indian retail item: ${product.product_name}. Reply with ONLY the exact direct image URL (ending in .jpg/.png/.webp), or NONE_FOUND if you cannot find one.`;
   const res = await fetch(`${GEMINI_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
