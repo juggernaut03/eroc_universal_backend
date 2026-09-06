@@ -370,6 +370,26 @@ async function acceptSuggestion(suggestion, reviewedBy) {
   const poolPath = findPoolFile(suggestion.suggested_barcode, suggestion.suffix);
   if (!poolPath) throw new Error(`Pool file for barcode ${suggestion.suggested_barcode} is missing — cannot accept`);
 
+  // A web_search suggestion already sits in the pool under this product's
+  // OWN barcode (written at generation time — see generateWebSearchSuggestions).
+  // A cross_tenant suggestion doesn't: the file only exists under a
+  // DIFFERENT tenant's barcode. Accepting one is the moment a human
+  // confirms the match is real, so promote it into the pool under this
+  // product's own barcode too — a plain copy, keeping the original
+  // barcode's file untouched. From then on, a plain barcode-exact sync
+  // (this tenant's re-syncs, or any other tenant importing the same
+  // barcode later) finds it directly, no fuzzy matching needed again.
+  if (suggestion.source === 'cross_tenant') {
+    const project = await getProjectModel().findOne({ project_code: suggestion.project_code }).lean();
+    const db = getTenantDb(project.db_name);
+    const ProductMaster = db.models.ProductMaster;
+    const product = await ProductMaster.findOne({ project_code: suggestion.project_code, p_code: suggestion.p_code })
+      .select('barcode').lean();
+    if (product?.barcode && !findPoolFile(product.barcode, suggestion.suffix)) {
+      await writeWebpToPool(product.barcode, suggestion.suffix, poolPath);
+    }
+  }
+
   const url = await copyPoolFileToTenant(poolPath, suggestion.project_code, suggestion.p_code, suggestion.suffix);
 
   suggestion.status = 'accepted';
