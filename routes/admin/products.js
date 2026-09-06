@@ -12,6 +12,11 @@ const createPerm = checkPermission('ecommerce', 'create');
 const editPerm = checkPermission('ecommerce', 'edit');
 const deletePerm = checkPermission('ecommerce', 'delete');
 
+// A user-typed search string used as a $regex literal has to have its
+// regex metacharacters escaped, or a term like "5.5" matches "5X5" too (and
+// an unbalanced "(" throws instead of matching anything).
+const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
 // Batched reverse lookup for the by-store product list: which additional
 // subcategories (beyond the primary) is each product cross-mapped to.
 const buildAdditionalSubCategoryIdsMap = async (pCodes = []) => {
@@ -194,8 +199,9 @@ router.post('/by-store', viewPerm, async (req, res) => {
     // search placeholder already claiming "product name, code, or
     // barcode" — p_code/barcode search never actually worked, and brand
     // wasn't attempted at all.
-    if (search && search.trim() !== '') {
-      const re = { $regex: search.trim(), $options: 'i' };
+    const searchTerm = search && search.trim();
+    if (searchTerm) {
+      const re = { $regex: escapeRegex(searchTerm), $options: 'i' };
       query.$or = [
         { product_name: re },
         { p_code: re },
@@ -217,19 +223,54 @@ router.post('/by-store', viewPerm, async (req, res) => {
       query.sub_category_id = sub_category_id;
     }
 
-    // Build sort object
-    const sort = {};
-    sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
-
-    // Execute query with pagination
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    const products = await ProductMaster.find(query)
-      .sort(sort)
-      .limit(parseInt(limit))
-      .skip(skip);
+    let products;
+    let total;
 
-    // Get total count for pagination
-    const total = await ProductMaster.countDocuments(query);
+    if (searchTerm) {
+      // A plain product_name sort buries an exact p_code/barcode hit
+      // alphabetically among dozens of unrelated substring matches (e.g.
+      // searching "427" also matches any barcode that merely contains
+      // "427" — real matches, just not what someone typing an exact code
+      // is looking for). Rank instead: exact code/barcode match first,
+      // then a code/name that starts with the term, then everything else,
+      // with product_name as the tiebreaker within each rank.
+      const escaped = escapeRegex(searchTerm);
+      const prefixRe = new RegExp(`^${escaped}`, 'i');
+      const pipeline = [
+        { $match: query },
+        {
+          $addFields: {
+            _searchRank: {
+              $switch: {
+                branches: [
+                  { case: { $eq: [{ $toLower: { $ifNull: ['$p_code', ''] } }, searchTerm.toLowerCase()] }, then: 0 },
+                  { case: { $eq: [{ $toLower: { $ifNull: ['$barcode', ''] } }, searchTerm.toLowerCase()] }, then: 1 },
+                  { case: { $regexMatch: { input: { $ifNull: ['$p_code', ''] }, regex: prefixRe } }, then: 2 },
+                  { case: { $regexMatch: { input: { $ifNull: ['$product_name', ''] }, regex: prefixRe } }, then: 3 }
+                ],
+                default: 4
+              }
+            }
+          }
+        },
+        { $sort: { _searchRank: 1, product_name: 1 } },
+        { $skip: skip },
+        { $limit: parseInt(limit) }
+      ];
+      products = await ProductMaster.aggregate(pipeline);
+      total = await ProductMaster.countDocuments(query);
+    } else {
+      const sort = {};
+      sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
+
+      products = await ProductMaster.find(query)
+        .sort(sort)
+        .limit(parseInt(limit))
+        .skip(skip);
+
+      total = await ProductMaster.countDocuments(query);
+    }
 
     const additionalSubCategoryIdsMap = await buildAdditionalSubCategoryIdsMap(
       products.map(product => product.p_code)
