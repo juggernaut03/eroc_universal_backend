@@ -159,6 +159,13 @@ router.post('/by-store', viewPerm, async (req, res) => {
       dept_id = '',
       category_id = '',
       sub_category_id = '',
+      // 'active' | 'inactive' | 'all'. Used to hardcode pcode_status: 'Y'
+      // here unconditionally — meaning an inactive product could never be
+      // found at all through this list, search included, with no way to
+      // ask for it. Defaults to 'all' now so search finds what's actually
+      // in the catalog; the admin panel's Status filter narrows it back
+      // down when that's what's wanted.
+      status = 'all',
       sortBy = 'product_name',
       sortOrder = 'asc'
     } = req.body;
@@ -172,14 +179,29 @@ router.post('/by-store', viewPerm, async (req, res) => {
     }
 
     // Build query
-    const query = {
-      store_code: store_code.trim(),
-      pcode_status: 'Y'
-    };
+    const query = { store_code: store_code.trim() };
 
-    // Add search filter
+    if (status === 'active') {
+      query.pcode_status = 'Y';
+    } else if (status === 'inactive') {
+      query.pcode_status = 'N';
+    }
+    // status === 'all' (or anything else unrecognized): no pcode_status
+    // filter at all.
+
+    // Add search filter — across product name, p_code, barcode, and brand.
+    // This previously matched product_name only, despite the panel's own
+    // search placeholder already claiming "product name, code, or
+    // barcode" — p_code/barcode search never actually worked, and brand
+    // wasn't attempted at all.
     if (search && search.trim() !== '') {
-      query.product_name = { $regex: search.trim(), $options: 'i' };
+      const re = { $regex: search.trim(), $options: 'i' };
+      query.$or = [
+        { product_name: re },
+        { p_code: re },
+        { barcode: re },
+        { brand_name: re }
+      ];
     }
 
     // Add optional filters
