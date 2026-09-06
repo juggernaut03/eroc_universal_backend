@@ -307,6 +307,19 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, trigge
   const project = await getProjectModel().findOne({ project_code: projectCode }).lean();
   if (!project) throw new Error(`Unknown project_code: ${projectCode}`);
 
+  // Real money per item below this point — a caller MUST bound the run
+  // explicitly, either by picking products or by a numeric limit. Belt and
+  // suspenders alongside the route's own check: without this, an empty
+  // pCodes array plus an unset limit would fall through to
+  // `untried.slice(0, undefined)`, which in JS returns the WHOLE array —
+  // silently searching every missing product in the catalog. Caught this
+  // exact bug live while testing the route (killed after 2 real calls);
+  // this is the fix, not just the route-level guard.
+  const hasExplicitSelection = Array.isArray(pCodes) && pCodes.length > 0;
+  if (!hasExplicitSelection && !(Number.isInteger(limit) && limit > 0)) {
+    throw new Error('generateWebSearchSuggestions requires a non-empty pCodes array or a positive limit');
+  }
+
   const settings = await getOrCreateSettings('+gemini_api_key');
   const geminiApiKey = settings.gemini_api_key;
   if (!geminiApiKey) {
@@ -327,14 +340,14 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, trigge
     project_code: projectCode,
     $or: [{ pcode_img: null }, { pcode_img: '' }],
   };
-  if (pCodes && pCodes.length > 0) {
+  if (hasExplicitSelection) {
     query.p_code = { $in: pCodes };
   }
 
   const candidates = await ProductMaster.find(query).select('p_code barcode product_name').lean();
 
   const untried = candidates.filter((c) => !triedSet.has(c.p_code));
-  const batch = pCodes && pCodes.length > 0 ? untried : untried.slice(0, limit);
+  const batch = hasExplicitSelection ? untried : untried.slice(0, limit);
 
   let found = 0;
   let notFound = 0;
@@ -375,7 +388,7 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, trigge
   }
 
   return {
-    requested: pCodes && pCodes.length > 0 ? pCodes.length : limit,
+    requested: hasExplicitSelection ? pCodes.length : limit,
     processed: batch.length,
     found,
     not_found: notFound,
