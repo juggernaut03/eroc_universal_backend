@@ -10,6 +10,7 @@ const {
 } = require('./imageSync');
 require('../models/ProductMaster');
 require('../models/ImageSuggestion');
+require('../models/ImageSearchJob');
 
 const GEMINI_MODEL = 'gemini-flash-latest';
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
@@ -313,7 +314,13 @@ async function downloadImage(url) {
 // it wouldn't do anything new and would hit the schema's unique index.
 // A product that came back NONE_FOUND last time has no doc at all, so
 // selecting it again is a legitimate, working retry.
-async function generateWebSearchSuggestions(projectCode, { limit, pCodes, triggeredBy, deepseekApiKey } = {}) {
+//
+// `onProgress`, when given, is called after every product the loop below
+// actually processes (found/not-found/errored — not the ones skipped up
+// front) with the running totals so far, so a caller tracking a background
+// job (see startWebSearchJob) can persist live progress instead of only
+// learning the outcome once the whole batch is done.
+async function generateWebSearchSuggestions(projectCode, { limit, pCodes, deepseekApiKey, onProgress } = {}) {
   const project = await getProjectModel().findOne({ project_code: projectCode }).lean();
   if (!project) throw new Error(`Unknown project_code: ${projectCode}`);
 
@@ -342,9 +349,9 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, trigge
   const ProductMaster = db.models.ProductMaster;
   const ImageSuggestion = db.models.ImageSuggestion;
 
-  const alreadyTried = await ImageSuggestion.find({ project_code: projectCode, source: 'web_search' })
-    .select('p_code').lean();
-  const triedSet = new Set(alreadyTried.map((s) => s.p_code));
+  const existing = await ImageSuggestion.find({ project_code: projectCode, source: 'web_search' })
+    .select('p_code status').lean();
+  const triedStatusByPCode = new Map(existing.map((s) => [s.p_code, s.status]));
 
   const query = {
     project_code: projectCode,
@@ -355,14 +362,31 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, trigge
   }
 
   const candidates = await ProductMaster.find(query).select('p_code barcode product_name').lean();
+  const candidatePCodes = new Set(candidates.map((c) => c.p_code));
 
-  const untried = candidates.filter((c) => !triedSet.has(c.p_code));
+  const untried = candidates.filter((c) => !triedStatusByPCode.has(c.p_code));
+  const alreadyTried = candidates.filter((c) => triedStatusByPCode.has(c.p_code));
   const batch = hasExplicitSelection ? untried : untried.slice(0, limit);
+
+  // Selected p_codes that vanished from the "missing" query entirely (an
+  // image already landed for them some other way, or the p_code is stale)
+  // — only meaningful for an explicit selection; a limit-based auto-pick
+  // has nothing outside the query to compare against. Without surfacing
+  // these (and the already-tried ones below) explicitly, "searched 5 of 10
+  // selected" reads as a bug rather than the accounted-for rest of the 10.
+  const results = [];
+  if (hasExplicitSelection) {
+    for (const pc of pCodes) {
+      if (!candidatePCodes.has(pc)) results.push({ p_code: pc, status: 'NOT_MISSING' });
+    }
+  }
+  for (const c of alreadyTried) {
+    results.push({ p_code: c.p_code, status: 'ALREADY_HAS_SUGGESTION', existing_status: triedStatusByPCode.get(c.p_code) });
+  }
 
   let found = 0;
   let notFound = 0;
   let errored = 0;
-  const results = [];
 
   for (const product of batch) {
     try {
@@ -394,17 +418,120 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, trigge
     } catch (err) {
       errored++;
       results.push({ p_code: product.p_code, status: 'ERROR', reason: err.message });
+    } finally {
+      if (onProgress) {
+        await onProgress({ processed: found + notFound + errored, found, not_found: notFound, errored, total: batch.length });
+      }
     }
   }
 
   return {
     requested: hasExplicitSelection ? pCodes.length : limit,
     processed: batch.length,
+    already_tried: alreadyTried.length,
+    not_missing: results.filter((r) => r.status === 'NOT_MISSING').length,
     found,
     not_found: notFound,
     errored,
     results
   };
+}
+
+// ---------------------------------------------------------------------
+// Web search jobs — queues generateWebSearchSuggestions in the background
+// instead of holding the admin's request open for the whole batch. Every
+// DB access here resolves the tenant connection directly via
+// getTenantDb(project.db_name), the same as generateWebSearchSuggestions
+// itself, rather than the request-scoped `req.tenant.db` — this code keeps
+// running long after the HTTP response that started it has been sent, so
+// it can't depend on anything tied to that request's lifetime.
+
+async function getImageSearchJobModel(projectCode) {
+  const project = await getProjectModel().findOne({ project_code: projectCode }).lean();
+  if (!project) throw new Error(`Unknown project_code: ${projectCode}`);
+  const db = getTenantDb(project.db_name);
+  return db.models.ImageSearchJob;
+}
+
+async function findRunningWebSearchJob(projectCode) {
+  const ImageSearchJob = await getImageSearchJobModel(projectCode);
+  return ImageSearchJob.findOne({ project_code: projectCode, status: 'running' }).lean();
+}
+
+async function listWebSearchJobs(projectCode, limit = 10) {
+  const ImageSearchJob = await getImageSearchJobModel(projectCode);
+  return ImageSearchJob.find({ project_code: projectCode })
+    .sort({ createdAt: -1 })
+    .limit(limit)
+    .select('-results')
+    .lean();
+}
+
+async function getWebSearchJob(projectCode, jobId) {
+  const ImageSearchJob = await getImageSearchJobModel(projectCode);
+  return ImageSearchJob.findOne({ _id: jobId, project_code: projectCode }).lean();
+}
+
+// Creates the job doc and returns it immediately — the actual search keeps
+// running in the background afterwards (deliberately not awaited past that
+// point). Throws JOB_ALREADY_RUNNING (with the existing job's id attached)
+// rather than letting two searches for the same tenant race each other.
+async function startWebSearchJob(projectCode, { limit, pCodes, triggeredByEmail, deepseekApiKey }) {
+  const ImageSearchJob = await getImageSearchJobModel(projectCode);
+
+  const running = await ImageSearchJob.findOne({ project_code: projectCode, status: 'running' });
+  if (running) {
+    const err = new Error('A web search job is already running for this tenant — wait for it to finish first.');
+    err.code = 'JOB_ALREADY_RUNNING';
+    err.jobId = running._id;
+    throw err;
+  }
+
+  const hasExplicitSelection = Array.isArray(pCodes) && pCodes.length > 0;
+  const job = await ImageSearchJob.create({
+    project_code: projectCode,
+    status: 'running',
+    requested: hasExplicitSelection ? pCodes.length : limit,
+    triggered_by_email: triggeredByEmail
+  });
+
+  generateWebSearchSuggestions(projectCode, {
+    limit,
+    pCodes,
+    deepseekApiKey,
+    onProgress: (progress) =>
+      ImageSearchJob.updateOne({ _id: job._id }, {
+        $set: {
+          batch_total: progress.total,
+          processed: progress.processed,
+          found: progress.found,
+          not_found: progress.not_found,
+          errored: progress.errored
+        }
+      }).catch(() => {}),
+  })
+    .then((result) =>
+      ImageSearchJob.updateOne({ _id: job._id }, {
+        $set: {
+          status: 'completed',
+          processed: result.processed,
+          found: result.found,
+          not_found: result.not_found,
+          already_tried: result.already_tried,
+          not_missing: result.not_missing,
+          errored: result.errored,
+          results: result.results,
+          finished_at: new Date()
+        }
+      })
+    )
+    .catch((err) =>
+      ImageSearchJob.updateOne({ _id: job._id }, {
+        $set: { status: 'failed', error_message: err.message, finished_at: new Date() }
+      })
+    );
+
+  return job;
 }
 
 // ---------------------------------------------------------------------
@@ -475,6 +602,10 @@ async function getSuggestionStats(projectCode) {
 module.exports = {
   generateCrossTenantSuggestions,
   generateWebSearchSuggestions,
+  startWebSearchJob,
+  findRunningWebSearchJob,
+  listWebSearchJobs,
+  getWebSearchJob,
   acceptSuggestion,
   rejectSuggestion,
   getSuggestionStats,

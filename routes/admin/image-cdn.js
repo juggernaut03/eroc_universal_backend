@@ -9,7 +9,9 @@ const { upload } = require('../../config/mediaStorage');
 const { syncProject, uploadPoolImage, bulkAddToPool, bulkUploadForTenant, findPoolFile } = require('../../utils/imageSync');
 const {
   generateCrossTenantSuggestions,
-  generateWebSearchSuggestions,
+  startWebSearchJob,
+  listWebSearchJobs,
+  getWebSearchJob,
   acceptSuggestion,
   rejectSuggestion,
   getSuggestionStats
@@ -313,7 +315,18 @@ router.post('/suggestions/generate', async (req, res, next) => {
 // without hand-picking. Real cost (Gemini search grounding). Only ever
 // processes products with no existing web_search suggestion yet — a
 // product that came back NONE_FOUND has no doc, so re-selecting it is a
-// legitimate retry; one that already found something is skipped either way.
+// legitimate retry; one that already found something is skipped either way
+// (and shows up in the finished job's results as ALREADY_HAS_SUGGESTION, so
+// "10 selected, only 5 actually searched" is visible instead of looking
+// like a bug).
+//
+// Queued, not run inline: each product can take several seconds (a Gemini
+// web search, a download, then vision verification), so a batch of even 10
+// can exceed a typical reverse-proxy timeout. This responds immediately
+// with a job id — poll GET .../web-search/jobs/:id for progress, or GET
+// .../web-search/jobs for recent history. Only one job per tenant runs at a
+// time; starting a second while one is running is rejected with 409 and
+// the running job's id, so the admin panel can just start polling that one.
 router.post('/suggestions/web-search', async (req, res, next) => {
   try {
     const { projectCode } = req.tenant;
@@ -326,20 +339,53 @@ router.post('/suggestions/web-search', async (req, res, next) => {
       return res.status(400).json({ success: false, message: 'Provide either p_codes (selected products) or limit' });
     }
 
-    const result = await generateWebSearchSuggestions(projectCode, {
+    const job = await startWebSearchJob(projectCode, {
       limit,
       pCodes,
+      triggeredByEmail: req.user.email,
       deepseekApiKey: process.env.DEEPSEEK_API_KEY || null
     });
+
     res.json({
       success: true,
-      message: `Searched ${result.processed} product(s) for ${projectCode} — found ${result.found}`,
-      data: result
+      message: `Search job started for ${job.requested} product(s) — track progress via the job status`,
+      data: { job_id: job._id, status: job.status, requested: job.requested }
     });
   } catch (error) {
     if (error.code === 'NO_GEMINI_KEY') {
       return res.status(400).json({ success: false, message: error.message });
     }
+    if (error.code === 'JOB_ALREADY_RUNNING') {
+      return res.status(409).json({ success: false, message: error.message, data: { job_id: error.jobId } });
+    }
+    next(error);
+  }
+});
+
+// GET /api/admin/image-cdn/suggestions/web-search/jobs?limit=10 — recent
+// jobs (running or finished), newest first, without the (possibly large)
+// per-product results array. Lets the admin panel show progress and detect
+// a job already running for this tenant without guessing.
+router.get('/suggestions/web-search/jobs', async (req, res, next) => {
+  try {
+    const { projectCode } = req.tenant;
+    const limit = Math.min(parseInt(req.query.limit, 10) || 10, 50);
+    const jobs = await listWebSearchJobs(projectCode, limit);
+    res.json({ success: true, count: jobs.length, data: jobs });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/admin/image-cdn/suggestions/web-search/jobs/:id — full detail
+// including the per-product results array, for polling one specific job.
+router.get('/suggestions/web-search/jobs/:id', async (req, res, next) => {
+  try {
+    const { projectCode } = req.tenant;
+    const job = await getWebSearchJob(projectCode, req.params.id);
+    if (!job) return res.status(404).json({ success: false, message: 'Job not found' });
+    res.json({ success: true, data: job });
+  } catch (error) {
     next(error);
   }
 });
