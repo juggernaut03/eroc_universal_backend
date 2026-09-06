@@ -1,11 +1,19 @@
 const os = require('os');
+const fs = require('fs');
 const express = require('express');
 const multer = require('multer');
 const router = express.Router();
 
 const { requireImageCdnAccess } = require('../../middleware/checkPermission');
 const { upload } = require('../../config/mediaStorage');
-const { syncProject, uploadPoolImage, bulkAddToPool, bulkUploadForTenant } = require('../../utils/imageSync');
+const { syncProject, uploadPoolImage, bulkAddToPool, bulkUploadForTenant, findPoolFile } = require('../../utils/imageSync');
+const {
+  generateCrossTenantSuggestions,
+  generateWebSearchSuggestions,
+  acceptSuggestion,
+  rejectSuggestion
+} = require('../../utils/imageSuggest');
+const { getOrCreateSettings } = require('../../models/PlatformSetting');
 
 // Separate multer instance from config/mediaStorage's — bulk pool uploads
 // can be dozens of files at once, too many to hold in memory together, so
@@ -205,6 +213,171 @@ router.post('/missing/bulk-upload', bulkUpload.array('images', 25), async (req, 
       message: `Uploaded ${saved.length} image(s) for ${projectCode}${skipped.length ? `, ${skipped.length} skipped` : ''}`,
       data: { saved, skipped }
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ---------------------------------------------------------------------
+// Image Match Suggestions — see the "Image Match Suggestions" architecture
+// plan (published as an Artifact, all three sources tested live before any
+// of this was built). Platform-wide, not tenant-scoped: one Gemini key
+// serves every tenant's suggestion generation, same as the shared pool.
+
+// GET /api/admin/image-cdn/settings — never returns the key itself, only
+// whether one is configured (same write-only convention as
+// routes/admin/project-settings.js's SECRET_FIELDS).
+router.get('/settings', async (req, res, next) => {
+  try {
+    const settings = await getOrCreateSettings('+gemini_api_key +gemini_api_key_updated_at');
+    res.json({
+      success: true,
+      data: {
+        gemini_configured: !!settings.gemini_api_key,
+        gemini_updated_at: settings.gemini_api_key_updated_at || null
+      }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/admin/image-cdn/settings — { gemini_api_key }. Empty string
+// clears it. Write-only: this response never echoes the value back either.
+router.post('/settings', async (req, res, next) => {
+  try {
+    const { gemini_api_key: geminiApiKey } = req.body;
+    if (typeof geminiApiKey !== 'string') {
+      return res.status(400).json({ success: false, message: 'gemini_api_key is required (use "" to clear it)' });
+    }
+
+    const settings = await getOrCreateSettings();
+    settings.gemini_api_key = geminiApiKey.trim();
+    settings.gemini_api_key_updated_by = req.user._id;
+    settings.gemini_api_key_updated_at = new Date();
+    await settings.save();
+
+    res.json({ success: true, message: geminiApiKey.trim() ? 'Gemini API key saved' : 'Gemini API key cleared' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/admin/image-cdn/suggestions/generate — cross-tenant text
+// matching + vision pre-filter. Free (no Gemini key required — vision
+// verification is skipped gracefully if none is configured, matching only
+// still runs on plain text). Manual-only, same as /sync.
+router.post('/suggestions/generate', async (req, res, next) => {
+  try {
+    const { projectCode } = req.tenant;
+    const result = await generateCrossTenantSuggestions(projectCode, {
+      deepseekApiKey: process.env.DEEPSEEK_API_KEY || null
+    });
+    res.json({ success: true, message: `Generated ${result.created} suggestion(s) for ${projectCode}`, data: result });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/admin/image-cdn/suggestions/web-search — { limit }. Real cost
+// (Gemini search grounding), so the admin explicitly chooses how many
+// missing products to spend it on — 50, 100, whatever they set. Only ever
+// processes products with no existing web_search suggestion yet, so a
+// second run with a bigger limit continues forward rather than re-spending.
+router.post('/suggestions/web-search', async (req, res, next) => {
+  try {
+    const { projectCode } = req.tenant;
+    const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 0, 1), 1000);
+
+    const result = await generateWebSearchSuggestions(projectCode, {
+      limit,
+      deepseekApiKey: process.env.DEEPSEEK_API_KEY || null
+    });
+    res.json({
+      success: true,
+      message: `Searched ${result.processed} product(s) for ${projectCode} — found ${result.found}`,
+      data: result
+    });
+  } catch (error) {
+    if (error.code === 'NO_GEMINI_KEY') {
+      return res.status(400).json({ success: false, message: error.message });
+    }
+    next(error);
+  }
+});
+
+// GET /api/admin/image-cdn/suggestions?status=pending
+router.get('/suggestions', async (req, res, next) => {
+  try {
+    const { projectCode } = req.tenant;
+    const ImageSuggestion = req.tenant.db.models.ImageSuggestion;
+    const status = ['pending', 'accepted', 'rejected'].includes(req.query.status) ? req.query.status : 'pending';
+
+    const suggestions = await ImageSuggestion.find({ project_code: projectCode, status })
+      .sort({ createdAt: -1 })
+      .limit(500)
+      .lean();
+
+    res.json({ success: true, count: suggestions.length, data: suggestions });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/admin/image-cdn/suggestions/:id/preview — streams the
+// candidate's actual bytes from the pool. Deliberately NOT a public CDN
+// URL: an unreviewed candidate (especially a web_search one, keyed by a
+// barcode that's about to become "real" for this tenant) stays behind
+// requireImageCdnAccess until an admin accepts it.
+router.get('/suggestions/:id/preview', async (req, res, next) => {
+  try {
+    const { projectCode } = req.tenant;
+    const ImageSuggestion = req.tenant.db.models.ImageSuggestion;
+    const suggestion = await ImageSuggestion.findOne({ _id: req.params.id, project_code: projectCode });
+    if (!suggestion) return res.status(404).json({ success: false, message: 'Suggestion not found' });
+
+    const poolPath = findPoolFile(suggestion.suggested_barcode, suggestion.suffix);
+    if (!poolPath) return res.status(404).json({ success: false, message: 'Candidate image is no longer in the pool' });
+
+    res.set('Content-Type', 'image/webp');
+    fs.createReadStream(poolPath).pipe(res);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/admin/image-cdn/suggestions/:id/accept
+router.post('/suggestions/:id/accept', async (req, res, next) => {
+  try {
+    const { projectCode } = req.tenant;
+    const ImageSuggestion = req.tenant.db.models.ImageSuggestion;
+    const suggestion = await ImageSuggestion.findOne({ _id: req.params.id, project_code: projectCode });
+    if (!suggestion) return res.status(404).json({ success: false, message: 'Suggestion not found' });
+    if (suggestion.status !== 'pending') {
+      return res.status(409).json({ success: false, message: `Already ${suggestion.status}` });
+    }
+
+    const url = await acceptSuggestion(suggestion, req.user._id);
+    res.json({ success: true, message: `Image set for ${suggestion.p_code}`, data: { url } });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/admin/image-cdn/suggestions/:id/reject — final; regenerating
+// suggestions never re-proposes a rejected p_code+source.
+router.post('/suggestions/:id/reject', async (req, res, next) => {
+  try {
+    const { projectCode } = req.tenant;
+    const ImageSuggestion = req.tenant.db.models.ImageSuggestion;
+    const suggestion = await ImageSuggestion.findOne({ _id: req.params.id, project_code: projectCode });
+    if (!suggestion) return res.status(404).json({ success: false, message: 'Suggestion not found' });
+    if (suggestion.status !== 'pending') {
+      return res.status(409).json({ success: false, message: `Already ${suggestion.status}` });
+    }
+
+    await rejectSuggestion(suggestion, req.user._id);
+    res.json({ success: true, message: 'Rejected' });
   } catch (error) {
     next(error);
   }

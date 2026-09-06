@@ -318,5 +318,10 @@ module.exports = {
   parsePoolFilename,
   parsePcodeFilename,
   findPoolFile,
-  buildImageUrl
+  buildImageUrl,
+  // Exported for utils/imageSuggest.js — both the cross-tenant and
+  // web-search suggestion paths reuse these rather than duplicating the
+  // pool-write/tenant-copy logic a third time.
+  writeWebpToPool,
+  copyPoolFileToTenant
 };
