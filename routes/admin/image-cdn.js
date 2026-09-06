@@ -5,7 +5,7 @@ const router = express.Router();
 
 const { requireImageCdnAccess } = require('../../middleware/checkPermission');
 const { upload } = require('../../config/mediaStorage');
-const { syncProject, uploadPoolImage, bulkAddToPool } = require('../../utils/imageSync');
+const { syncProject, uploadPoolImage, bulkAddToPool, bulkUploadForTenant } = require('../../utils/imageSync');
 
 // Separate multer instance from config/mediaStorage's — bulk pool uploads
 // can be dozens of files at once, too many to hold in memory together, so
@@ -176,6 +176,33 @@ router.post('/pool/bulk-upload', bulkUpload.array('images', 25), async (req, res
     res.json({
       success: true,
       message: `Added ${saved.length} image(s) to the pool${skipped.length ? `, ${skipped.length} skipped` : ''}`,
+      data: { saved, skipped }
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/admin/image-cdn/missing/bulk-upload — multipart, field
+// "images" (up to 25 files per call). This is the bulk version of /upload
+// above: files are named <p_code>_1.<ext> (or _2, or bare <p_code>.<ext>)
+// — THIS tenant's own product codes, not barcodes — and each one closes
+// its own missing-list gap immediately (pcode_img/pcode_img_2 updated
+// right away, no separate sync needed). Still keys the shared pool by that
+// product's real barcode under the hood, so other tenants sharing the same
+// barcode benefit too.
+router.post('/missing/bulk-upload', bulkUpload.array('images', 25), async (req, res, next) => {
+  try {
+    const { projectCode } = req.tenant;
+    if (!req.files || req.files.length === 0) {
+      return res.status(400).json({ success: false, message: 'No image files were uploaded' });
+    }
+
+    const { saved, skipped } = await bulkUploadForTenant(req.files, projectCode);
+
+    res.json({
+      success: true,
+      message: `Uploaded ${saved.length} image(s) for ${projectCode}${skipped.length ? `, ${skipped.length} skipped` : ''}`,
       data: { saved, skipped }
     });
   } catch (error) {

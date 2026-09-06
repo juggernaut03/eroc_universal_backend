@@ -157,6 +157,27 @@ async function writeWebpToPool(barcode, suffix, input) {
   return poolPath;
 }
 
+// Copies an already-in-the-pool file into one tenant's public folder and
+// stamps the resulting URL onto that product — the second half of both
+// uploadPoolImage() and bulkUploadForTenant() below, factored out so the
+// single-image and bulk paths can't drift from each other.
+async function copyPoolFileToTenant(poolPath, projectCode, pcode, suffix) {
+  const tenantDir = path.join(CDN_STORE_ROOT, projectCode);
+  await ensureDir(tenantDir);
+  const dest = path.join(tenantDir, `${pcode}_${suffix}.webp`);
+  await fs.promises.copyFile(poolPath, dest);
+  const publicUrl = buildImageUrl(projectCode, pcode, suffix);
+
+  const project = await getProjectModel().findOne({ project_code: projectCode }).lean();
+  if (!project) throw new Error(`Unknown project_code: ${projectCode}`);
+  const db = getTenantDb(project.db_name);
+  const ProductMaster = db.models.ProductMaster;
+  const field = suffix === 1 ? 'pcode_img' : 'pcode_img_2';
+  await ProductMaster.updateOne({ project_code: projectCode, p_code: pcode }, { $set: { [field]: publicUrl } });
+
+  return publicUrl;
+}
+
 // Converts an uploaded buffer to webp and writes it into the pool as
 // <barcode>_<suffix>.webp, then immediately copies it into the one tenant
 // folder the admin is working in — this is the single-image manual backfill
@@ -169,37 +190,43 @@ async function uploadPoolImage({ barcode, suffix, buffer, projectCode, pcode }) 
 
   let publicUrl = null;
   if (projectCode && pcode) {
-    const tenantDir = path.join(CDN_STORE_ROOT, projectCode);
-    await ensureDir(tenantDir);
-    const dest = path.join(tenantDir, `${pcode}_${suffix}.webp`);
-    await fs.promises.copyFile(poolPath, dest);
-    publicUrl = buildImageUrl(projectCode, pcode, suffix);
-
-    const db = getTenantDb((await getProjectModel().findOne({ project_code: projectCode }).lean()).db_name);
-    const ProductMaster = db.models.ProductMaster;
-    const field = suffix === 1 ? 'pcode_img' : 'pcode_img_2';
-    await ProductMaster.updateOne({ project_code: projectCode, p_code: pcode }, { $set: { [field]: publicUrl } });
+    publicUrl = await copyPoolFileToTenant(poolPath, projectCode, pcode, suffix);
   }
 
   return { pool_path: poolPath, url: publicUrl };
 }
 
-// A pool filename is <barcode>_1 / <barcode>_2 / bare <barcode> (mirrors the
-// three shapes findPoolFile() already reads — see its comment). Bulk-uploaded
-// files are expected to already be named this way by whoever's handling the
-// photography (the same convention as the seeded pool), so this just reads
-// the barcode/suffix back out of the name the admin gave the file, rather
-// than asking them to enter it by hand for every file in a batch.
-function parsePoolFilename(originalname) {
+// A filename token is <token>_1 / <token>_2 / bare <token> — same shape
+// whether the token is a barcode (the shared pool's convention) or a p_code
+// (this tenant's own convention). Shared parser, two named wrappers below
+// so call sites read as what they actually mean.
+function parseTokenFilename(originalname) {
   const stem = originalname.replace(/\.[^./\\]+$/, '').trim();
   const suffixMatch = /^(.+)_([12])$/.exec(stem);
-  const barcode = suffixMatch ? suffixMatch[1] : stem;
+  const token = suffixMatch ? suffixMatch[1] : stem;
   const suffix = suffixMatch ? Number(suffixMatch[2]) : 1;
 
-  if (!barcode || !SAFE_BARCODE_RE.test(barcode)) {
+  if (!token || !SAFE_BARCODE_RE.test(token)) {
     return null;
   }
-  return { barcode, suffix };
+  return { token, suffix };
+}
+
+// Bulk-uploaded pool files are expected to already be named this way by
+// whoever's handling the photography (the same convention as the seeded
+// pool), so this just reads the barcode/suffix back out of the name the
+// admin gave the file, rather than asking them to enter it by hand for
+// every file in a batch.
+function parsePoolFilename(originalname) {
+  const parsed = parseTokenFilename(originalname);
+  return parsed ? { barcode: parsed.token, suffix: parsed.suffix } : null;
+}
+
+// Same idea, but for the missing-images bulk upload — files named by this
+// tenant's own p_code instead of a barcode (see bulkUploadForTenant below).
+function parsePcodeFilename(originalname) {
+  const parsed = parseTokenFilename(originalname);
+  return parsed ? { pcode: parsed.token, suffix: parsed.suffix } : null;
 }
 
 // Bulk pool add: many files in one call, each named <barcode>_1.<ext> (or
@@ -232,11 +259,64 @@ async function bulkAddToPool(files) {
   return { saved, skipped };
 }
 
+// Bulk upload for one tenant's own missing-images list: files named
+// <p_code>_1.<ext> (or _2, or bare <p_code>.<ext>) — this tenant's own
+// product codes, not barcodes. For each file, looks up that product's real
+// barcode (still the pool's key — so the shared pool gains this image too,
+// benefiting any other tenant carrying the same barcode later), writes it
+// into the pool, then copies straight into this tenant's public folder and
+// updates pcode_img/pcode_img_2 immediately — unlike bulkAddToPool, this
+// does NOT need a separate "Sync now" afterwards, since it's already
+// scoped to one known tenant + p_code per file.
+async function bulkUploadForTenant(files, projectCode) {
+  const project = await getProjectModel().findOne({ project_code: projectCode }).lean();
+  if (!project) throw new Error(`Unknown project_code: ${projectCode}`);
+  const db = getTenantDb(project.db_name);
+  const ProductMaster = db.models.ProductMaster;
+
+  const saved = [];
+  const skipped = [];
+
+  for (const file of files) {
+    const parsed = parsePcodeFilename(file.originalname);
+    try {
+      if (!parsed) {
+        skipped.push({ filename: file.originalname, reason: 'Could not read a p_code from this filename' });
+        continue;
+      }
+      const product = await ProductMaster.findOne({ project_code: projectCode, p_code: parsed.pcode }).select('barcode');
+      if (!product) {
+        skipped.push({ filename: file.originalname, reason: `No product ${parsed.pcode} in ${projectCode}` });
+        continue;
+      }
+      if (!product.barcode) {
+        skipped.push({
+          filename: file.originalname,
+          reason: `Product ${parsed.pcode} has no barcode on file — nothing to key the pool image by`
+        });
+        continue;
+      }
+
+      const poolPath = await writeWebpToPool(product.barcode, parsed.suffix, file.path);
+      const url = await copyPoolFileToTenant(poolPath, projectCode, parsed.pcode, parsed.suffix);
+      saved.push({ filename: file.originalname, p_code: parsed.pcode, suffix: parsed.suffix, url });
+    } catch (err) {
+      skipped.push({ filename: file.originalname, reason: err.message });
+    } finally {
+      await fs.promises.unlink(file.path).catch(() => {});
+    }
+  }
+
+  return { saved, skipped };
+}
+
 module.exports = {
   syncProject,
   uploadPoolImage,
   bulkAddToPool,
+  bulkUploadForTenant,
   parsePoolFilename,
+  parsePcodeFilename,
   findPoolFile,
   buildImageUrl
 };
