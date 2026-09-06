@@ -294,7 +294,16 @@ async function downloadImage(url) {
   return Buffer.from(arrayBuffer);
 }
 
-async function generateWebSearchSuggestions(projectCode, { limit, triggeredBy, deepseekApiKey } = {}) {
+// `pCodes`, when given, is the admin explicitly picking exactly which
+// missing products to spend a web search on from the Missing Images list
+// — takes priority over `limit` (an arbitrary "just pick the next N"
+// batch), which stays as a convenience for bulk-searching without
+// hand-picking every row. Either way, a product that already has a
+// web_search suggestion doc (pending or resolved) is skipped — re-selecting
+// it wouldn't do anything new and would hit the schema's unique index.
+// A product that came back NONE_FOUND last time has no doc at all, so
+// selecting it again is a legitimate, working retry.
+async function generateWebSearchSuggestions(projectCode, { limit, pCodes, triggeredBy, deepseekApiKey } = {}) {
   const project = await getProjectModel().findOne({ project_code: projectCode }).lean();
   if (!project) throw new Error(`Unknown project_code: ${projectCode}`);
 
@@ -314,12 +323,18 @@ async function generateWebSearchSuggestions(projectCode, { limit, triggeredBy, d
     .select('p_code').lean();
   const triedSet = new Set(alreadyTried.map((s) => s.p_code));
 
-  const candidates = await ProductMaster.find({
+  const query = {
     project_code: projectCode,
     $or: [{ pcode_img: null }, { pcode_img: '' }],
-  }).select('p_code barcode product_name').lean();
+  };
+  if (pCodes && pCodes.length > 0) {
+    query.p_code = { $in: pCodes };
+  }
 
-  const batch = candidates.filter((c) => !triedSet.has(c.p_code)).slice(0, limit);
+  const candidates = await ProductMaster.find(query).select('p_code barcode product_name').lean();
+
+  const untried = candidates.filter((c) => !triedSet.has(c.p_code));
+  const batch = pCodes && pCodes.length > 0 ? untried : untried.slice(0, limit);
 
   let found = 0;
   let notFound = 0;
@@ -359,7 +374,14 @@ async function generateWebSearchSuggestions(projectCode, { limit, triggeredBy, d
     }
   }
 
-  return { requested: limit, processed: batch.length, found, not_found: notFound, errored, results };
+  return {
+    requested: pCodes && pCodes.length > 0 ? pCodes.length : limit,
+    processed: batch.length,
+    found,
+    not_found: notFound,
+    errored,
+    results
+  };
 }
 
 // ---------------------------------------------------------------------
@@ -407,9 +429,30 @@ async function rejectSuggestion(suggestion, reviewedBy) {
   await suggestion.save();
 }
 
+// Counts for the admin UI's own KPI row — separate from the plain
+// coverage/missing tiles above it, since those describe the catalog, not
+// how much progress the suggestion queue itself has made.
+async function getSuggestionStats(projectCode) {
+  const project = await getProjectModel().findOne({ project_code: projectCode }).lean();
+  if (!project) throw new Error(`Unknown project_code: ${projectCode}`);
+  const db = getTenantDb(project.db_name);
+  const ImageSuggestion = db.models.ImageSuggestion;
+
+  const [pending, accepted, rejected, pendingCrossTenant, pendingWebSearch] = await Promise.all([
+    ImageSuggestion.countDocuments({ project_code: projectCode, status: 'pending' }),
+    ImageSuggestion.countDocuments({ project_code: projectCode, status: 'accepted' }),
+    ImageSuggestion.countDocuments({ project_code: projectCode, status: 'rejected' }),
+    ImageSuggestion.countDocuments({ project_code: projectCode, status: 'pending', source: 'cross_tenant' }),
+    ImageSuggestion.countDocuments({ project_code: projectCode, status: 'pending', source: 'web_search' }),
+  ]);
+
+  return { pending, accepted, rejected, pending_cross_tenant: pendingCrossTenant, pending_web_search: pendingWebSearch };
+}
+
 module.exports = {
   generateCrossTenantSuggestions,
   generateWebSearchSuggestions,
   acceptSuggestion,
   rejectSuggestion,
+  getSuggestionStats,
 };

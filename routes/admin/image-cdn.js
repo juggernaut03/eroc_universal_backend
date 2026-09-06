@@ -11,7 +11,8 @@ const {
   generateCrossTenantSuggestions,
   generateWebSearchSuggestions,
   acceptSuggestion,
-  rejectSuggestion
+  rejectSuggestion,
+  getSuggestionStats
 } = require('../../utils/imageSuggest');
 const { getOrCreateSettings } = require('../../models/PlatformSetting');
 
@@ -273,24 +274,45 @@ router.post('/suggestions/generate', async (req, res, next) => {
     const result = await generateCrossTenantSuggestions(projectCode, {
       deepseekApiKey: process.env.DEEPSEEK_API_KEY || null
     });
-    res.json({ success: true, message: `Generated ${result.created} suggestion(s) for ${projectCode}`, data: result });
+
+    let message = `Generated ${result.created} suggestion(s) for ${projectCode}`;
+    if (result.created === 0) {
+      // A plain "Generated 0" reads as broken when really it just means
+      // nothing NEW turned up — the deterministic matcher already saw
+      // every missing product in the last run. Say that explicitly.
+      message = result.skipped_existing > 0
+        ? `No new matches — ${result.skipped_existing} product(s) already have a suggestion from a previous run`
+        : `No matches found among ${result.total_missing} missing product(s)`;
+    }
+
+    res.json({ success: true, message, data: result });
   } catch (error) {
     next(error);
   }
 });
 
-// POST /api/admin/image-cdn/suggestions/web-search — { limit }. Real cost
-// (Gemini search grounding), so the admin explicitly chooses how many
-// missing products to spend it on — 50, 100, whatever they set. Only ever
-// processes products with no existing web_search suggestion yet, so a
-// second run with a bigger limit continues forward rather than re-spending.
+// POST /api/admin/image-cdn/suggestions/web-search — { p_codes } to search
+// exactly the products the admin picked from the Missing Images list
+// (takes priority), or { limit } to auto-pick the next N missing products
+// without hand-picking. Real cost (Gemini search grounding). Only ever
+// processes products with no existing web_search suggestion yet — a
+// product that came back NONE_FOUND has no doc, so re-selecting it is a
+// legitimate retry; one that already found something is skipped either way.
 router.post('/suggestions/web-search', async (req, res, next) => {
   try {
     const { projectCode } = req.tenant;
+    const pCodes = Array.isArray(req.body.p_codes)
+      ? req.body.p_codes.filter((c) => typeof c === 'string' && c.trim()).map((c) => c.trim())
+      : null;
     const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 0, 1), 1000);
+
+    if ((!pCodes || pCodes.length === 0) && !req.body.limit) {
+      return res.status(400).json({ success: false, message: 'Provide either p_codes (selected products) or limit' });
+    }
 
     const result = await generateWebSearchSuggestions(projectCode, {
       limit,
+      pCodes,
       deepseekApiKey: process.env.DEEPSEEK_API_KEY || null
     });
     res.json({
@@ -302,6 +324,19 @@ router.post('/suggestions/web-search', async (req, res, next) => {
     if (error.code === 'NO_GEMINI_KEY') {
       return res.status(400).json({ success: false, message: error.message });
     }
+    next(error);
+  }
+});
+
+// GET /api/admin/image-cdn/suggestions/stats — counts for the UI's own KPI
+// row (pending/accepted/rejected, split by source for pending), separate
+// from the plain coverage/missing tiles that describe the catalog itself.
+router.get('/suggestions/stats', async (req, res, next) => {
+  try {
+    const { projectCode } = req.tenant;
+    const stats = await getSuggestionStats(projectCode);
+    res.json({ success: true, data: stats });
+  } catch (error) {
     next(error);
   }
 });
