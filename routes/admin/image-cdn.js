@@ -71,19 +71,35 @@ router.get('/missing', async (req, res, next) => {
     const { projectCode } = req.tenant;
     const ProductMaster = req.tenant.db.models.ProductMaster;
     // Capped well above any real catalog size so the admin UI's CSV export
-    // (which asks for everything, not just a page) gets the full list in
-    // one call rather than needing pagination.
+    // (which asks for everything, not just a page) can still get the full
+    // list in one call by passing a big limit and leaving page unset.
     const limit = Math.min(parseInt(req.query.limit, 10) || 200, 10000);
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const skip = (page - 1) * limit;
 
-    const missing = await ProductMaster.find({
+    const query = {
       project_code: projectCode,
       $or: [{ pcode_img: null }, { pcode_img: '' }]
-    })
-      .select('p_code barcode product_name')
-      .limit(limit)
-      .lean();
+    };
 
-    res.json({ success: true, count: missing.length, data: missing });
+    const [missing, total] = await Promise.all([
+      ProductMaster.find(query)
+        .select('p_code barcode product_name')
+        .sort({ p_code: 1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      ProductMaster.countDocuments(query)
+    ]);
+
+    res.json({
+      success: true,
+      count: missing.length,
+      total,
+      page,
+      pages: Math.max(Math.ceil(total / limit), 1),
+      data: missing
+    });
   } catch (error) {
     next(error);
   }
