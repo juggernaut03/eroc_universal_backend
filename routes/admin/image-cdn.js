@@ -357,19 +357,34 @@ router.get('/suggestions/stats', async (req, res, next) => {
   }
 });
 
-// GET /api/admin/image-cdn/suggestions?status=pending
+// GET /api/admin/image-cdn/suggestions?status=pending&page=1&limit=20 — the
+// review queue can easily run into the hundreds (cross-tenant matching in
+// particular), so this is paginated the same way /missing is: an explicit
+// sort plus skip/limit, never relying on natural document order to stay
+// stable across pages.
 router.get('/suggestions', async (req, res, next) => {
   try {
     const { projectCode } = req.tenant;
     const ImageSuggestion = req.tenant.db.models.ImageSuggestion;
     const status = ['pending', 'accepted', 'rejected'].includes(req.query.status) ? req.query.status : 'pending';
+    const limit = Math.min(parseInt(req.query.limit, 10) || 20, 200);
+    const page = Math.max(parseInt(req.query.page, 10) || 1, 1);
+    const skip = (page - 1) * limit;
 
-    const suggestions = await ImageSuggestion.find({ project_code: projectCode, status })
-      .sort({ createdAt: -1 })
-      .limit(500)
-      .lean();
+    const query = { project_code: projectCode, status };
+    const [suggestions, total] = await Promise.all([
+      ImageSuggestion.find(query).sort({ createdAt: -1, _id: -1 }).skip(skip).limit(limit).lean(),
+      ImageSuggestion.countDocuments(query)
+    ]);
 
-    res.json({ success: true, count: suggestions.length, data: suggestions });
+    res.json({
+      success: true,
+      count: suggestions.length,
+      total,
+      page,
+      pages: Math.max(Math.ceil(total / limit), 1),
+      data: suggestions
+    });
   } catch (error) {
     next(error);
   }
