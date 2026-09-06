@@ -67,11 +67,22 @@ router.get('/coverage', async (req, res, next) => {
   }
 });
 
-// GET /api/admin/image-cdn/missing?limit=200
+// GET /api/admin/image-cdn/missing?limit=200 — each row is annotated with
+// `suggestion` (its most relevant ImageSuggestion, if any) so the admin can
+// tell which missing products already have something waiting for review
+// without switching over to the Suggested matches queue. A product can have
+// several suggestion docs (one per source/suffix); pending outranks
+// rejected outranks accepted (accepted rarely coexists with "missing" —
+// only possible for a still-missing secondary image — but is included for
+// completeness) since pending is the one that actually needs the admin's
+// attention.
+const SUGGESTION_STATUS_RANK = { pending: 2, rejected: 1, accepted: 0 };
+
 router.get('/missing', async (req, res, next) => {
   try {
     const { projectCode } = req.tenant;
     const ProductMaster = req.tenant.db.models.ProductMaster;
+    const ImageSuggestion = req.tenant.db.models.ImageSuggestion;
     // Capped well above any real catalog size so the admin UI's CSV export
     // (which asks for everything, not just a page) can still get the full
     // list in one call by passing a big limit and leaving page unset.
@@ -94,13 +105,27 @@ router.get('/missing', async (req, res, next) => {
       ProductMaster.countDocuments(query)
     ]);
 
+    const suggestions = await ImageSuggestion.find({
+      project_code: projectCode,
+      p_code: { $in: missing.map((m) => m.p_code) }
+    }).select('p_code status source').lean();
+
+    const suggestionByPCode = new Map();
+    for (const s of suggestions) {
+      const existing = suggestionByPCode.get(s.p_code);
+      if (!existing || SUGGESTION_STATUS_RANK[s.status] > SUGGESTION_STATUS_RANK[existing.status]) {
+        suggestionByPCode.set(s.p_code, { status: s.status, source: s.source });
+      }
+    }
+    const withSuggestions = missing.map((m) => ({ ...m, suggestion: suggestionByPCode.get(m.p_code) || null }));
+
     res.json({
       success: true,
-      count: missing.length,
+      count: withSuggestions.length,
       total,
       page,
       pages: Math.max(Math.ceil(total / limit), 1),
-      data: missing
+      data: withSuggestions
     });
   } catch (error) {
     next(error);
