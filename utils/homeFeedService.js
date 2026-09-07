@@ -46,6 +46,7 @@ const SECTION_TYPES = {
   PRODUCT_RAIL: 'product_rail',
   OFFER_STRIP: 'offer_strip',
   SEASONAL_PICKS: 'seasonal_picks',
+  RECENTLY_VIEWED: 'recently_viewed',
 };
 
 // Banner placements the home screen draws. `home_top` is the hero carousel the
@@ -488,6 +489,13 @@ function assembleFeed({
   // 5. Brands, then advertisements.
   if (brands) sections.push(brands);
   if (ads) sections.push(ads);
+
+  // 5b. Recently viewed — personalized, so the server sends only a
+  // placeholder for the client to fill from on-device history (see
+  // PERSONALIZED_TYPES). This default layout previously omitted it entirely,
+  // so any tenant that had never opened the Home Builder could never show
+  // this rail at all, no matter how many products a shopper viewed.
+  sections.push(personalizedSection({ type: SECTION_TYPES.RECENTLY_VIEWED, index: 0 }));
 
   // 6. Seasonal picks.
   const seasonalFirst = seasonal[0];
