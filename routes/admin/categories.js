@@ -379,7 +379,14 @@ router.get('/departments/all', viewPerm, async (req, res) => {
     }
 
     if (storeCode) {
-      query.store_code = storeCode;
+      // A department with no store_code (stored as null, or 'null' per the
+      // schema's own default) applies to every store — the same convention
+      // Department.findByStoreCode already implements. Most tenants seed
+      // their departments this way (shared across stores; only categories
+      // vary per store), so a strict equality match here was hiding every
+      // department for any tenant that hadn't also given each one a real
+      // store_code, e.g. RET2690 (Shree Mega Mart).
+      query.store_code = { $in: [storeCode, null, 'null'] };
     }
 
     if (deptTypeId) {
