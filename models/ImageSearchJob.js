@@ -13,7 +13,7 @@ const resultEntrySchema = new mongoose.Schema({
   p_code: { type: String, required: true },
   status: {
     type: String,
-    enum: ['FOUND', 'NONE_FOUND', 'URL_DID_NOT_RESOLVE', 'ALREADY_HAS_SUGGESTION', 'NOT_MISSING', 'ERROR'],
+    enum: ['FOUND', 'NONE_FOUND', 'URL_DID_NOT_RESOLVE', 'ALREADY_HAS_SUGGESTION', 'NOT_MISSING', 'BUDGET_STOPPED', 'ERROR'],
     required: true
   },
   url: String,
@@ -54,6 +54,17 @@ const imageSearchJobSchema = new mongoose.Schema({
   already_tried: { type: Number, default: 0 },
   not_missing: { type: Number, default: 0 },
   errored: { type: Number, default: 0 },
+  // How many of `batch_total` were left un-searched because `budget_inr`
+  // was hit first — see config/geminiPricing.js and generateWebSearchSuggestions.
+  budget_stopped: { type: Number, default: 0 },
+  // Optional admin-set INR ceiling — the job stops issuing new grounded
+  // search calls once estimated_cost_inr would exceed this. Unset means
+  // no cap beyond `requested`/`limit` itself.
+  budget_inr: { type: Number },
+  // Running (then final) cost estimate — see config/geminiPricing.js for
+  // where the per-request numbers come from. An estimate, not a real
+  // billing figure.
+  estimated_cost_inr: { type: Number, default: 0 },
   results: [resultEntrySchema],
   triggered_by_email: { type: String, trim: true },
   error_message: String,

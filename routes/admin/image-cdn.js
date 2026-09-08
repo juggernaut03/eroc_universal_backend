@@ -359,6 +359,9 @@ router.post('/suggestions/web-search', async (req, res, next) => {
       ? req.body.p_codes.filter((c) => typeof c === 'string' && c.trim()).map((c) => c.trim())
       : null;
     const limit = Math.min(Math.max(parseInt(req.body.limit, 10) || 0, 1), 1000);
+    // Optional spend guardrail — see config/geminiPricing.js. 0/absent means
+    // no cap beyond `limit`/the selection size itself.
+    const budgetInr = req.body.budget_inr ? Math.max(parseFloat(req.body.budget_inr), 0) : null;
 
     if ((!pCodes || pCodes.length === 0) && !req.body.limit) {
       return res.status(400).json({ success: false, message: 'Provide either p_codes (selected products) or limit' });
@@ -367,6 +370,7 @@ router.post('/suggestions/web-search', async (req, res, next) => {
     const job = await startWebSearchJob(projectCode, {
       limit,
       pCodes,
+      budgetInr,
       triggeredByEmail: req.user.email,
       deepseekApiKey: process.env.DEEPSEEK_API_KEY || null
     });
@@ -374,11 +378,11 @@ router.post('/suggestions/web-search', async (req, res, next) => {
     res.json({
       success: true,
       message: `Search job started for ${job.requested} product(s) — track progress via the job status`,
-      data: { job_id: job._id, status: job.status, requested: job.requested }
+      data: { job_id: job._id, status: job.status, requested: job.requested, budget_inr: job.budget_inr ?? null }
     });
   } catch (error) {
-    if (error.code === 'NO_GEMINI_KEY') {
-      return res.status(400).json({ success: false, message: error.message });
+    if (error.code === 'NO_GEMINI_KEY' || error.code === 'INVALID_GEMINI_KEY') {
+      return res.status(400).json({ success: false, message: error.message, data: { code: error.code } });
     }
     if (error.code === 'JOB_ALREADY_RUNNING') {
       return res.status(409).json({ success: false, message: error.message, data: { job_id: error.jobId } });

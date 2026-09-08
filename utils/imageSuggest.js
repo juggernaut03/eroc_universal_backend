@@ -3,6 +3,7 @@ const fs = require('fs');
 const { getProjectModel } = require('../models/Project');
 const { getTenantDb } = require('../config/database');
 const { getOrCreateSettings } = require('../models/PlatformSetting');
+const { GROUNDED_SEARCH_COST_INR, VISION_VERIFY_COST_INR } = require('../config/geminiPricing');
 const {
   findPoolFile,
   writeWebpToPool,
@@ -12,7 +13,16 @@ require('../models/ProductMaster');
 require('../models/ImageSuggestion');
 require('../models/ImageSearchJob');
 
-const GEMINI_MODEL = 'gemini-flash-latest';
+// Separately configurable per purpose, both defaulting to the model
+// that's actually been confirmed working in production — NOT a guessed
+// "cheaper" model name. Grounding (google_search tool) needs
+// GEMINI_SEARCH_MODEL to actually support it; swapping either one is
+// safe to try via env var without a code change, but verify a candidate
+// model works (and is genuinely cheaper) with a real test call before
+// relying on it — the API fails loudly (404/400) on an unknown model
+// name, it doesn't silently downgrade.
+const GEMINI_SEARCH_MODEL = process.env.GEMINI_SEARCH_MODEL || 'gemini-flash-latest';
+const GEMINI_VERIFY_MODEL = process.env.GEMINI_VERIFY_MODEL || 'gemini-flash-latest';
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions';
 const DEEPSEEK_MODEL = 'deepseek-v4-flash-vision-exp';
@@ -154,7 +164,7 @@ async function verifyWithGemini(buffer, mimeType, productDescriptor, apiKey) {
         ],
       }],
     };
-    const res = await fetch(`${GEMINI_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
+    const res = await fetch(`${GEMINI_BASE}/${GEMINI_VERIFY_MODEL}:generateContent?key=${apiKey}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
@@ -283,7 +293,7 @@ async function findImageUrlViaGemini(product, apiKey) {
   // field, so it doesn't belong in a search query where a wrong value can
   // only ever hurt, never help.
   const prompt = `Find a real product photo image URL for this Indian retail item: ${product.product_name}. Reply with ONLY the exact direct image URL (ending in .jpg/.png/.webp), or NONE_FOUND if you cannot find one.`;
-  const res = await fetch(`${GEMINI_BASE}/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
+  const res = await fetch(`${GEMINI_BASE}/${GEMINI_SEARCH_MODEL}:generateContent?key=${apiKey}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -305,6 +315,30 @@ async function downloadImage(url) {
   return Buffer.from(arrayBuffer);
 }
 
+// Cheap pre-flight check — one plain, ungrounded generateContent call
+// (trivial prompt, no image, no search tool) to confirm the configured
+// key actually authenticates BEFORE a job commits to a whole batch. Added
+// after a real incident: a placeholder key ("asdfgh...") got saved into
+// Image CDN settings, and every web-search attempt for the next ~11 hours
+// failed instantly with "API key not valid" — harmless cost-wise (Google
+// rejects before any billable work happens) but wasted the admin's time
+// and looked identical to "nothing found" until someone checked the raw
+// error. This turns that into an immediate, clear rejection instead.
+async function verifyGeminiKeyWorks(apiKey) {
+  try {
+    const res = await fetch(`${GEMINI_BASE}/${GEMINI_VERIFY_MODEL}:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contents: [{ parts: [{ text: 'ping' }] }] }),
+    });
+    if (res.ok) return { ok: true };
+    const data = await res.json().catch(() => ({}));
+    return { ok: false, reason: data.error?.message || `HTTP ${res.status}` };
+  } catch (err) {
+    return { ok: false, reason: err.message };
+  }
+}
+
 // `pCodes`, when given, is the admin explicitly picking exactly which
 // missing products to spend a web search on from the Missing Images list
 // — takes priority over `limit` (an arbitrary "just pick the next N"
@@ -320,7 +354,14 @@ async function downloadImage(url) {
 // front) with the running totals so far, so a caller tracking a background
 // job (see startWebSearchJob) can persist live progress instead of only
 // learning the outcome once the whole batch is done.
-async function generateWebSearchSuggestions(projectCode, { limit, pCodes, deepseekApiKey, onProgress } = {}) {
+//
+// `maxBudgetInr`, when given, is a spend guardrail — see config/geminiPricing.js
+// for where the per-request estimate comes from. Checked BEFORE each
+// grounded search call (not after), so the running estimate never
+// knowingly goes over budget by even one more call; whatever's left in the
+// batch at that point is recorded as BUDGET_STOPPED rather than silently
+// dropped, so `processed` still accounts for the full batch either way.
+async function generateWebSearchSuggestions(projectCode, { limit, pCodes, deepseekApiKey, maxBudgetInr, onProgress } = {}) {
   const project = await getProjectModel().findOne({ project_code: projectCode }).lean();
   if (!project) throw new Error(`Unknown project_code: ${projectCode}`);
 
@@ -387,10 +428,24 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, deepse
   let found = 0;
   let notFound = 0;
   let errored = 0;
+  let budgetStopped = 0;
+  let estimatedCostInr = 0;
+  const hasBudget = typeof maxBudgetInr === 'number' && maxBudgetInr > 0;
 
   for (const product of batch) {
+    // Checked BEFORE spending — the search call alone (win or lose) always
+    // costs GROUNDED_SEARCH_COST_INR, so that's the number to guard
+    // against, not the possibly-larger total after a FOUND also adds the
+    // vision-verify cost.
+    if (hasBudget && estimatedCostInr + GROUNDED_SEARCH_COST_INR > maxBudgetInr) {
+      budgetStopped++;
+      results.push({ p_code: product.p_code, status: 'BUDGET_STOPPED' });
+      continue;
+    }
+
     try {
       const url = await findImageUrlViaGemini(product, geminiApiKey);
+      estimatedCostInr += GROUNDED_SEARCH_COST_INR;
       if (!url) { notFound++; results.push({ p_code: product.p_code, status: 'NONE_FOUND' }); continue; }
 
       const buffer = await downloadImage(url);
@@ -401,6 +456,7 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, deepse
       // not just this one.
       const poolPath = await writeWebpToPool(product.barcode, 1, buffer);
       const vision = await verifyCandidate(poolPath, product.product_name, { geminiApiKey, deepseekApiKey });
+      estimatedCostInr += VISION_VERIFY_COST_INR;
 
       await ImageSuggestion.create({
         project_code: projectCode,
@@ -416,11 +472,25 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, deepse
       found++;
       results.push({ p_code: product.p_code, status: 'FOUND', url });
     } catch (err) {
+      // A call that failed before Google could bill it (invalid key,
+      // depleted prepay balance, network error) didn't cost anything —
+      // but there's no reliable way to tell that apart from a call that
+      // failed AFTER being billed, so this still counts toward the
+      // estimate. Better to over-estimate spend on a bad run than under
+      // it and let the guardrail miss a real problem.
+      estimatedCostInr += GROUNDED_SEARCH_COST_INR;
       errored++;
       results.push({ p_code: product.p_code, status: 'ERROR', reason: err.message });
     } finally {
       if (onProgress) {
-        await onProgress({ processed: found + notFound + errored, found, not_found: notFound, errored, total: batch.length });
+        await onProgress({
+          processed: found + notFound + errored,
+          found,
+          not_found: notFound,
+          errored,
+          total: batch.length,
+          estimated_cost_inr: Math.round(estimatedCostInr)
+        });
       }
     }
   }
@@ -430,6 +500,8 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, deepse
     processed: batch.length,
     already_tried: alreadyTried.length,
     not_missing: results.filter((r) => r.status === 'NOT_MISSING').length,
+    budget_stopped: budgetStopped,
+    estimated_cost_inr: Math.round(estimatedCostInr),
     found,
     not_found: notFound,
     errored,
@@ -475,8 +547,10 @@ async function getWebSearchJob(projectCode, jobId) {
 // Creates the job doc and returns it immediately — the actual search keeps
 // running in the background afterwards (deliberately not awaited past that
 // point). Throws JOB_ALREADY_RUNNING (with the existing job's id attached)
-// rather than letting two searches for the same tenant race each other.
-async function startWebSearchJob(projectCode, { limit, pCodes, triggeredByEmail, deepseekApiKey }) {
+// rather than letting two searches for the same tenant race each other, and
+// INVALID_GEMINI_KEY if a cheap pre-flight ping fails — see
+// verifyGeminiKeyWorks's own comment for why that check exists.
+async function startWebSearchJob(projectCode, { limit, pCodes, budgetInr, triggeredByEmail, deepseekApiKey }) {
   const ImageSearchJob = await getImageSearchJobModel(projectCode);
 
   const running = await ImageSearchJob.findOne({ project_code: projectCode, status: 'running' });
@@ -487,11 +561,27 @@ async function startWebSearchJob(projectCode, { limit, pCodes, triggeredByEmail,
     throw err;
   }
 
+  const settings = await getOrCreateSettings('+gemini_api_key');
+  const geminiApiKey = settings.gemini_api_key;
+  if (!geminiApiKey) {
+    const err = new Error('No Gemini API key configured — set one in Image CDN settings first.');
+    err.code = 'NO_GEMINI_KEY';
+    throw err;
+  }
+  const keyCheck = await verifyGeminiKeyWorks(geminiApiKey);
+  if (!keyCheck.ok) {
+    const err = new Error(`Gemini API key rejected: ${keyCheck.reason} — fix it in Image CDN settings before starting a search.`);
+    err.code = 'INVALID_GEMINI_KEY';
+    throw err;
+  }
+
   const hasExplicitSelection = Array.isArray(pCodes) && pCodes.length > 0;
+  const hasBudget = typeof budgetInr === 'number' && budgetInr > 0;
   const job = await ImageSearchJob.create({
     project_code: projectCode,
     status: 'running',
     requested: hasExplicitSelection ? pCodes.length : limit,
+    budget_inr: hasBudget ? budgetInr : undefined,
     triggered_by_email: triggeredByEmail
   });
 
@@ -499,6 +589,7 @@ async function startWebSearchJob(projectCode, { limit, pCodes, triggeredByEmail,
     limit,
     pCodes,
     deepseekApiKey,
+    maxBudgetInr: hasBudget ? budgetInr : undefined,
     onProgress: (progress) =>
       ImageSearchJob.updateOne({ _id: job._id }, {
         $set: {
@@ -506,7 +597,8 @@ async function startWebSearchJob(projectCode, { limit, pCodes, triggeredByEmail,
           processed: progress.processed,
           found: progress.found,
           not_found: progress.not_found,
-          errored: progress.errored
+          errored: progress.errored,
+          estimated_cost_inr: progress.estimated_cost_inr
         }
       }).catch(() => {}),
   })
@@ -519,6 +611,8 @@ async function startWebSearchJob(projectCode, { limit, pCodes, triggeredByEmail,
           not_found: result.not_found,
           already_tried: result.already_tried,
           not_missing: result.not_missing,
+          budget_stopped: result.budget_stopped,
+          estimated_cost_inr: result.estimated_cost_inr,
           errored: result.errored,
           results: result.results,
           finished_at: new Date()
