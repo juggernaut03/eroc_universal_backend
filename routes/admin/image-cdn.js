@@ -273,12 +273,18 @@ router.post('/missing/bulk-upload', bulkUpload.array('images', 25), async (req, 
 // routes/admin/project-settings.js's SECRET_FIELDS).
 router.get('/settings', async (req, res, next) => {
   try {
-    const settings = await getOrCreateSettings('+gemini_api_key +gemini_api_key_updated_at');
+    const settings = await getOrCreateSettings(
+      '+gemini_api_key +gemini_api_key_updated_at +google_cse_api_key +google_cse_id +google_cse_updated_at'
+    );
     res.json({
       success: true,
       data: {
         gemini_configured: !!settings.gemini_api_key,
-        gemini_updated_at: settings.gemini_api_key_updated_at || null
+        gemini_updated_at: settings.gemini_api_key_updated_at || null,
+        // Both pieces are required for the cheaper Google Custom Search
+        // path to actually be used — see generateWebSearchSuggestions.
+        google_cse_configured: !!(settings.google_cse_api_key && settings.google_cse_id),
+        google_cse_updated_at: settings.google_cse_updated_at || null
       }
     });
   } catch (error) {
@@ -286,22 +292,40 @@ router.get('/settings', async (req, res, next) => {
   }
 });
 
-// POST /api/admin/image-cdn/settings — { gemini_api_key }. Empty string
-// clears it. Write-only: this response never echoes the value back either.
+// POST /api/admin/image-cdn/settings — any of { gemini_api_key,
+// google_cse_api_key, google_cse_id }, all optional independently (send
+// only the ones you're changing). Empty string clears that field.
+// Write-only: this response never echoes any value back.
 router.post('/settings', async (req, res, next) => {
   try {
-    const { gemini_api_key: geminiApiKey } = req.body;
-    if (typeof geminiApiKey !== 'string') {
-      return res.status(400).json({ success: false, message: 'gemini_api_key is required (use "" to clear it)' });
+    const { gemini_api_key: geminiApiKey, google_cse_api_key: googleCseApiKey, google_cse_id: googleCseId } = req.body;
+    const fields = { gemini_api_key: geminiApiKey, google_cse_api_key: googleCseApiKey, google_cse_id: googleCseId };
+    const provided = Object.entries(fields).filter(([, v]) => typeof v === 'string');
+    if (provided.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'Provide at least one of gemini_api_key, google_cse_api_key, google_cse_id (use "" to clear one)'
+      });
     }
 
     const settings = await getOrCreateSettings();
-    settings.gemini_api_key = geminiApiKey.trim();
-    settings.gemini_api_key_updated_by = req.user._id;
-    settings.gemini_api_key_updated_at = new Date();
+    const saved = [];
+    if (typeof geminiApiKey === 'string') {
+      settings.gemini_api_key = geminiApiKey.trim();
+      settings.gemini_api_key_updated_by = req.user._id;
+      settings.gemini_api_key_updated_at = new Date();
+      saved.push(geminiApiKey.trim() ? 'Gemini API key' : 'Gemini API key (cleared)');
+    }
+    if (typeof googleCseApiKey === 'string' || typeof googleCseId === 'string') {
+      if (typeof googleCseApiKey === 'string') settings.google_cse_api_key = googleCseApiKey.trim();
+      if (typeof googleCseId === 'string') settings.google_cse_id = googleCseId.trim();
+      settings.google_cse_updated_by = req.user._id;
+      settings.google_cse_updated_at = new Date();
+      saved.push('Google Custom Search settings');
+    }
     await settings.save();
 
-    res.json({ success: true, message: geminiApiKey.trim() ? 'Gemini API key saved' : 'Gemini API key cleared' });
+    res.json({ success: true, message: `Saved: ${saved.join(', ')}` });
   } catch (error) {
     next(error);
   }
@@ -381,7 +405,7 @@ router.post('/suggestions/web-search', async (req, res, next) => {
       data: { job_id: job._id, status: job.status, requested: job.requested, budget_inr: job.budget_inr ?? null }
     });
   } catch (error) {
-    if (error.code === 'NO_GEMINI_KEY' || error.code === 'INVALID_GEMINI_KEY') {
+    if (error.code === 'NO_GEMINI_KEY' || error.code === 'INVALID_GEMINI_KEY' || error.code === 'INVALID_GOOGLE_CSE') {
       return res.status(400).json({ success: false, message: error.message, data: { code: error.code } });
     }
     if (error.code === 'JOB_ALREADY_RUNNING') {

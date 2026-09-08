@@ -26,6 +26,33 @@ const platformSettingSchema = new mongoose.Schema(
       type: Date,
       select: false,
     },
+    // Google Programmable Search Engine (Custom Search JSON API) — an
+    // opt-in, much cheaper alternative search step to Gemini's Grounding
+    // tool (~$5/1,000 queries vs. Grounding's flat per-request tool fee —
+    // see config/geminiPricing.js's cost comparison). Used ahead of Gemini
+    // grounding when both are configured; Gemini grounding stays the
+    // fallback so nothing breaks for a tenant that hasn't set this up.
+    google_cse_api_key: {
+      type: String,
+      trim: true,
+      select: false,
+    },
+    // The Search Engine ID ("cx") from programmablesearchengine.google.com
+    // — not secret on its own, but kept write-only for consistency with
+    // the rest of this document.
+    google_cse_id: {
+      type: String,
+      trim: true,
+      select: false,
+    },
+    google_cse_updated_by: {
+      type: mongoose.Schema.Types.ObjectId,
+      select: false,
+    },
+    google_cse_updated_at: {
+      type: Date,
+      select: false,
+    },
   },
   { timestamps: true, collection: 'platformsettings' }
 );

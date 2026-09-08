@@ -61,6 +61,12 @@ const imageSuggestionSchema = new mongoose.Schema(
     // Only set for web_search — the page Gemini's grounding cited, kept
     // for audit/debugging, never shown as if it were the CDN URL.
     source_url: { type: String, trim: true },
+    // Only set for web_search — which lookup actually produced source_url:
+    // 'open_food_facts' (free, barcode lookup), 'google_cse' (cheap paid
+    // search), or 'gemini_grounding' (the original, more expensive path —
+    // still the automatic fallback when the cheaper options aren't
+    // configured or don't have this product). See generateWebSearchSuggestions.
+    found_via: { type: String, enum: ['open_food_facts', 'google_cse', 'gemini_grounding', null], default: null },
     vision_gemini: {
       verdict: { type: String, enum: ['MATCH', 'NO_MATCH', null], default: null },
       reason: { type: String, trim: true },

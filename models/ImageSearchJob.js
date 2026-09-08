@@ -21,7 +21,11 @@ const resultEntrySchema = new mongoose.Schema({
   // Only set for ALREADY_HAS_SUGGESTION — which state the existing
   // suggestion is in, so the admin knows whether it's still sitting in the
   // review queue or was already resolved one way or the other.
-  existing_status: String
+  existing_status: String,
+  // Only set for FOUND — which lookup actually found it (free barcode
+  // lookup, cheap paid search, or the more expensive Gemini fallback).
+  // See ImageSuggestion.found_via / generateWebSearchSuggestions.
+  found_via: String
 }, { _id: false });
 
 const imageSearchJobSchema = new mongoose.Schema({

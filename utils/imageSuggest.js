@@ -3,7 +3,12 @@ const fs = require('fs');
 const { getProjectModel } = require('../models/Project');
 const { getTenantDb } = require('../config/database');
 const { getOrCreateSettings } = require('../models/PlatformSetting');
-const { GROUNDED_SEARCH_COST_INR, VISION_VERIFY_COST_INR } = require('../config/geminiPricing');
+const {
+  GROUNDED_SEARCH_COST_INR,
+  GOOGLE_CSE_COST_INR,
+  OPEN_FOOD_FACTS_COST_INR,
+  VISION_VERIFY_COST_INR,
+} = require('../config/geminiPricing');
 const {
   findPoolFile,
   writeWebpToPool,
@@ -26,6 +31,12 @@ const GEMINI_VERIFY_MODEL = process.env.GEMINI_VERIFY_MODEL || 'gemini-flash-lat
 const GEMINI_BASE = 'https://generativelanguage.googleapis.com/v1beta/models';
 const DEEPSEEK_URL = 'https://api.deepseek.com/chat/completions';
 const DEEPSEEK_MODEL = 'deepseek-v4-flash-vision-exp';
+// Free, no API key — a community-run open product database, queried by
+// barcode. Covers both food (openfoodfacts.org) and non-food
+// (openproductsfacts.org) items under the same account/schema.
+const OPEN_FOOD_FACTS_BASE = 'https://world.openfoodfacts.org/api/v2/product';
+const OPEN_PRODUCTS_FACTS_BASE = 'https://world.openproductsfacts.org/api/v2/product';
+const GOOGLE_CSE_BASE = 'https://www.googleapis.com/customsearch/v1';
 
 // Same tokenizer/scorer tested against real data in the architecture plan
 // (§02) — brand-gated, IDF-weighted word overlap with a package-size
@@ -308,6 +319,57 @@ async function findImageUrlViaGemini(product, apiKey) {
   return match ? match[0] : null;
 }
 
+// Free, no API key, no cost — a community-run open product database keyed
+// by barcode (the one signal this catalog actually trusts least for
+// *matching* purposes, per findImageUrlViaGemini's comment above, but is
+// still a perfectly good lookup key here since it's an exact hit-or-miss,
+// not a fuzzy match). Tried first for every product that has a barcode,
+// before spending anything on a paid search — coverage is incomplete
+// (community-contributed) so this won't find everything, but every hit
+// costs ₹0 instead of ₹1–32. Checks the food database first, then the
+// non-food one, since most of this catalog is FMCG/grocery.
+async function findImageUrlViaOpenFoodFacts(barcode) {
+  if (!barcode) return null;
+  for (const base of [OPEN_FOOD_FACTS_BASE, OPEN_PRODUCTS_FACTS_BASE]) {
+    try {
+      const res = await fetch(`${base}/${encodeURIComponent(barcode)}.json?fields=image_front_url,image_url`);
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (data.status !== 1 || !data.product) continue;
+      const url = data.product.image_front_url || data.product.image_url;
+      if (url) return url;
+    } catch {
+      // Non-fatal — falls through to the next base, then to whatever paid
+      // search step is configured.
+    }
+  }
+  return null;
+}
+
+// Google's plain Custom Search JSON API — real web search results with no
+// LLM reasoning bundled in, ~30x cheaper per request than Gemini's
+// Grounding tool (see config/geminiPricing.js). Needs its own Search
+// Engine ID (cx) configured to search the whole web with Image Search
+// turned on, from https://programmablesearchengine.google.com/, plus an
+// API key with the Custom Search API enabled — set both in Image CDN
+// settings. `num: 1, searchType: 'image'` asks for exactly one image
+// result, so this is one request per product like the Gemini path, not a
+// bigger multi-result fetch.
+async function findImageUrlViaGoogleCSE(product, apiKey, cx) {
+  const params = new URLSearchParams({
+    key: apiKey,
+    cx,
+    q: product.product_name,
+    searchType: 'image',
+    num: '1',
+    safe: 'active',
+  });
+  const res = await fetch(`${GOOGLE_CSE_BASE}?${params.toString()}`);
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error?.message || `HTTP ${res.status}`);
+  return data.items?.[0]?.link || null;
+}
+
 async function downloadImage(url) {
   const res = await fetch(url);
   if (!res.ok || !res.headers.get('content-type')?.startsWith('image/')) return null;
@@ -331,6 +393,22 @@ async function verifyGeminiKeyWorks(apiKey) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ contents: [{ parts: [{ text: 'ping' }] }] }),
     });
+    if (res.ok) return { ok: true };
+    const data = await res.json().catch(() => ({}));
+    return { ok: false, reason: data.error?.message || `HTTP ${res.status}` };
+  } catch (err) {
+    return { ok: false, reason: err.message };
+  }
+}
+
+// Same idea as verifyGeminiKeyWorks, for the (opt-in) Google Custom Search
+// path — one real query against a throwaway term, so a bad key/cx pair
+// fails the whole job immediately instead of erroring out on every single
+// product in the batch.
+async function verifyGoogleCseWorks(apiKey, cx) {
+  try {
+    const params = new URLSearchParams({ key: apiKey, cx, q: 'test', num: '1' });
+    const res = await fetch(`${GOOGLE_CSE_BASE}?${params.toString()}`);
     if (res.ok) return { ok: true };
     const data = await res.json().catch(() => ({}));
     return { ok: false, reason: data.error?.message || `HTTP ${res.status}` };
@@ -378,13 +456,19 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, deepse
     throw new Error('generateWebSearchSuggestions requires a non-empty pCodes array or a positive limit');
   }
 
-  const settings = await getOrCreateSettings('+gemini_api_key');
+  const settings = await getOrCreateSettings('+gemini_api_key +google_cse_api_key +google_cse_id');
   const geminiApiKey = settings.gemini_api_key;
   if (!geminiApiKey) {
     const err = new Error('No Gemini API key configured — set one in Image CDN settings first.');
     err.code = 'NO_GEMINI_KEY';
     throw err;
   }
+  // Opt-in — only used when both pieces are set. Gemini grounding remains
+  // the fallback (see the search step below), so a tenant that hasn't set
+  // this up yet sees no behavior change.
+  const googleCseApiKey = settings.google_cse_api_key || null;
+  const googleCseId = settings.google_cse_id || null;
+  const hasGoogleCse = !!(googleCseApiKey && googleCseId);
 
   const db = getTenantDb(project.db_name);
   const ProductMaster = db.models.ProductMaster;
@@ -433,19 +517,49 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, deepse
   const hasBudget = typeof maxBudgetInr === 'number' && maxBudgetInr > 0;
 
   for (const product of batch) {
-    // Checked BEFORE spending — the search call alone (win or lose) always
-    // costs GROUNDED_SEARCH_COST_INR, so that's the number to guard
-    // against, not the possibly-larger total after a FOUND also adds the
-    // vision-verify cost.
-    if (hasBudget && estimatedCostInr + GROUNDED_SEARCH_COST_INR > maxBudgetInr) {
-      budgetStopped++;
-      results.push({ p_code: product.p_code, status: 'BUDGET_STOPPED' });
-      continue;
+    // Free pass first, for every product that has a barcode — never
+    // budget-gated (costs nothing whether it hits or misses). Its own
+    // try/catch: a failure here (OFF down, network blip) must fall
+    // through silently to the paid step, never get attributed a cost or
+    // counted as this item's ERROR.
+    let url = null;
+    let foundVia = null;
+    if (product.barcode) {
+      try {
+        url = await findImageUrlViaOpenFoodFacts(product.barcode);
+        if (url) foundVia = 'open_food_facts';
+      } catch {
+        // Falls through to the paid step below.
+      }
+    }
+
+    // Prefer Google Custom Search when configured — far cheaper per
+    // request than Gemini's Grounding tool (see config/geminiPricing.js);
+    // Gemini grounding is the automatic fallback otherwise. Checked BEFORE
+    // spending — a paid search call (win or lose) always costs the same
+    // flat fee, so that's the number to guard against, not the
+    // possibly-larger total after a FOUND also adds the vision-verify
+    // cost. Only reached when the free pass above didn't already find
+    // something.
+    if (!url) {
+      const paidCostInr = hasGoogleCse ? GOOGLE_CSE_COST_INR : GROUNDED_SEARCH_COST_INR;
+      if (hasBudget && estimatedCostInr + paidCostInr > maxBudgetInr) {
+        budgetStopped++;
+        results.push({ p_code: product.p_code, status: 'BUDGET_STOPPED' });
+        continue;
+      }
     }
 
     try {
-      const url = await findImageUrlViaGemini(product, geminiApiKey);
-      estimatedCostInr += GROUNDED_SEARCH_COST_INR;
+      if (!url) {
+        const paidCostInr = hasGoogleCse ? GOOGLE_CSE_COST_INR : GROUNDED_SEARCH_COST_INR;
+        url = hasGoogleCse
+          ? await findImageUrlViaGoogleCSE(product, googleCseApiKey, googleCseId)
+          : await findImageUrlViaGemini(product, geminiApiKey);
+        estimatedCostInr += paidCostInr;
+        if (url) foundVia = hasGoogleCse ? 'google_cse' : 'gemini_grounding';
+      }
+
       if (!url) { notFound++; results.push({ p_code: product.p_code, status: 'NONE_FOUND' }); continue; }
 
       const buffer = await downloadImage(url);
@@ -466,19 +580,20 @@ async function generateWebSearchSuggestions(projectCode, { limit, pCodes, deepse
         source: 'web_search',
         suggested_barcode: product.barcode,
         source_url: url,
+        found_via: foundVia,
         vision_gemini: vision.gemini || {},
         vision_deepseek: vision.deepseek || {},
       });
       found++;
-      results.push({ p_code: product.p_code, status: 'FOUND', url });
+      results.push({ p_code: product.p_code, status: 'FOUND', url, found_via: foundVia });
     } catch (err) {
-      // A call that failed before Google could bill it (invalid key,
-      // depleted prepay balance, network error) didn't cost anything —
-      // but there's no reliable way to tell that apart from a call that
-      // failed AFTER being billed, so this still counts toward the
-      // estimate. Better to over-estimate spend on a bad run than under
-      // it and let the guardrail miss a real problem.
-      estimatedCostInr += GROUNDED_SEARCH_COST_INR;
+      // A call that failed before being billed (invalid key, depleted
+      // prepay balance, network error) didn't cost anything — but there's
+      // no reliable way to tell that apart from a call that failed AFTER
+      // being billed, so this still counts toward the estimate. Better to
+      // over-estimate spend on a bad run than under it and let the
+      // guardrail miss a real problem.
+      estimatedCostInr += hasGoogleCse ? GOOGLE_CSE_COST_INR : GROUNDED_SEARCH_COST_INR;
       errored++;
       results.push({ p_code: product.p_code, status: 'ERROR', reason: err.message });
     } finally {
@@ -561,7 +676,7 @@ async function startWebSearchJob(projectCode, { limit, pCodes, budgetInr, trigge
     throw err;
   }
 
-  const settings = await getOrCreateSettings('+gemini_api_key');
+  const settings = await getOrCreateSettings('+gemini_api_key +google_cse_api_key +google_cse_id');
   const geminiApiKey = settings.gemini_api_key;
   if (!geminiApiKey) {
     const err = new Error('No Gemini API key configured — set one in Image CDN settings first.');
@@ -573,6 +688,17 @@ async function startWebSearchJob(projectCode, { limit, pCodes, budgetInr, trigge
     const err = new Error(`Gemini API key rejected: ${keyCheck.reason} — fix it in Image CDN settings before starting a search.`);
     err.code = 'INVALID_GEMINI_KEY';
     throw err;
+  }
+  // Same fail-fast principle, for the (opt-in) cheaper search path — a bad
+  // cx/key pair here would otherwise fail every single item in the batch
+  // individually instead of the whole job up front.
+  if (settings.google_cse_api_key && settings.google_cse_id) {
+    const cseCheck = await verifyGoogleCseWorks(settings.google_cse_api_key, settings.google_cse_id);
+    if (!cseCheck.ok) {
+      const err = new Error(`Google Custom Search key/ID rejected: ${cseCheck.reason} — fix it in Image CDN settings before starting a search.`);
+      err.code = 'INVALID_GOOGLE_CSE';
+      throw err;
+    }
   }
 
   const hasExplicitSelection = Array.isArray(pCodes) && pCodes.length > 0;
@@ -703,4 +829,7 @@ module.exports = {
   acceptSuggestion,
   rejectSuggestion,
   getSuggestionStats,
+  // Exported mainly for direct testing/reuse — the free lookup step has no
+  // API key or job wiring of its own, so it's safe to call standalone.
+  findImageUrlViaOpenFoodFacts,
 };
