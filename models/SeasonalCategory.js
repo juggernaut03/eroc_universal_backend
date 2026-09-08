@@ -6,6 +6,18 @@ const seasonalCategoryItemSchema = new mongoose.Schema({
     required: [true, 'Sub category ID is required'],
     trim: true
   },
+  // Which collection `sub_category_id` is actually an id into. Category and
+  // Subcategory ids are both small per-tenant sequences, so the same number
+  // commonly names two unrelated things — an admin typing a category id into
+  // this field (thinking "which tile category") used to silently resolve to
+  // a same-numbered subcategory instead. Explicit beats guessed. Defaults to
+  // 'subcategory' so every tile entered before this field existed keeps
+  // resolving exactly as it did (see routes/seasonal-categories.js).
+  reference_type: {
+    type: String,
+    enum: ['category', 'subcategory'],
+    default: 'subcategory'
+  },
   store_code: {
     type: String,
     trim: true
