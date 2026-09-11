@@ -1,4 +1,5 @@
 const express = require('express');
+const multer = require('multer');
 const router = express.Router();
 const Product = require('../../models/Product');
 const ProductMaster = require('../../models/ProductMaster');
@@ -6,6 +7,15 @@ const Subcategory = require('../../models/Subcategory');
 const SubcategoryProductMap = require('../../models/SubcategoryProductMap');
 const { checkPermission } = require('../../middleware/checkPermission');
 const { enforceProductLimit } = require('../../middleware/subscription');
+
+// A single CSV, small enough to hold in memory (a few thousand rows is at
+// most a few MB) — no need for the disk-storage pattern the image-CDN's
+// bulk uploads use for potentially dozens of large image files at once.
+const csvUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, file.mimetype === 'text/csv' || file.originalname.toLowerCase().endsWith('.csv'))
+});
 
 const viewPerm = checkPermission('ecommerce', 'view');
 const createPerm = checkPermission('ecommerce', 'create');
@@ -810,6 +820,159 @@ router.delete('/master/:id', deletePerm, async (req, res) => {
     res.status(500).json({
       success: false,
       message: 'Error deleting product',
+      error: error.message
+    });
+  }
+});
+
+// ==================== BULK CSV UPDATE ====================
+
+// Minimal comma-split parser — the real exports seen from store admins
+// (e.g. My_need_mart_PRODUCT_RATE_MASTER CSV) have no quoted/escaped commas
+// in any field, and often carry a trailing empty column from a stray comma
+// at the end of every line; since every field below is read by NAME (via
+// the header-built index), that extra empty column just goes unused rather
+// than shifting anything.
+function parseCsvBuffer(buffer) {
+  return buffer
+    .toString('utf8')
+    .trim()
+    .split(/\r?\n/)
+    .map((line) => line.split(',').map((cell) => cell.trim()));
+}
+
+const PACKAGE_SIZE_RE = /^([0-9.]+)\s*([A-Za-z]+)$/;
+
+// @route   POST /api/admin/products/bulk-update-csv
+// @desc    Store admins periodically re-export their own rate/stock sheet
+//          (P_CODE, BARCODE, package_size, BRAND_NAME, BR_CODE, our_price,
+//          product_mrp, quantity, store_code_status) and upload it here to
+//          push a fresh price/stock/active-status snapshot into the
+//          catalog. Deliberately an UPDATE-only pass, matched by p_code:
+//          a p_code with no existing product is reported and skipped
+//          rather than inserted, since this file carries no department/
+//          category to place a new product under (see
+//          scripts/update_shree_mega_mart_pricing.js, which this route
+//          productizes — same logic, now reusable by any tenant from the
+//          admin panel instead of a one-off CLI run). pcode_img and
+//          category placement are never touched.
+// @access  Admin (ecommerce:edit)
+router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: 'CSV file is required (field name "file")' });
+    }
+
+    // Optional — scopes the match to the admin panel's currently-selected
+    // store, so a tenant with more than one store can't have one store's
+    // upload silently touch a same-numbered p_code that actually belongs
+    // to a different store. Omitted, it matches by p_code alone (fine for
+    // the common case: one store per tenant).
+    const storeCode = typeof req.body.store_code === 'string' ? req.body.store_code.trim() : '';
+
+    const rows = parseCsvBuffer(req.file.buffer);
+    if (rows.length < 2) {
+      return res.status(400).json({ success: false, message: 'CSV has no data rows' });
+    }
+
+    const header = rows[0].map((h) => h.trim());
+    const idx = Object.fromEntries(header.map((h, i) => [h, i]));
+    if (idx.P_CODE === undefined) {
+      return res.status(400).json({ success: false, message: 'CSV is missing a P_CODE column' });
+    }
+
+    const dataRows = rows.slice(1).filter((r) => r.length > 1 && r[idx.P_CODE] && r[idx.P_CODE].trim());
+    const pcodes = [...new Set(dataRows.map((r) => r[idx.P_CODE].trim()))];
+
+    const matchQuery = { p_code: { $in: pcodes } };
+    if (storeCode) matchQuery.store_code = storeCode;
+
+    const existing = await ProductMaster.find(matchQuery)
+      .select('p_code our_price pcode_status');
+    const existingByPcode = new Map(existing.map((p) => [p.p_code, p]));
+
+    let updated = 0;
+    let priceChanged = 0;
+    let statusChanged = 0;
+    const skippedNotFound = [];
+    const packageSizeSkipped = [];
+
+    for (const row of dataRows) {
+      const pcode = row[idx.P_CODE].trim();
+      const current = existingByPcode.get(pcode);
+      if (!current) {
+        skippedNotFound.push(pcode);
+        continue;
+      }
+
+      // Every field is independent — a malformed package_size on one row
+      // must not block that same row's price/stock/status update, so a
+      // parse failure just skips setting package_size/package_unit, not
+      // the whole row.
+      const set = {};
+
+      if (idx.BARCODE !== undefined && row[idx.BARCODE]) set.barcode = row[idx.BARCODE].trim();
+      if (idx.product_name !== undefined && row[idx.product_name]) set.product_name = row[idx.product_name].trim();
+      if (idx.BRAND_NAME !== undefined && row[idx.BRAND_NAME]) set.brand_name = row[idx.BRAND_NAME].trim();
+      if (idx.BR_CODE !== undefined && row[idx.BR_CODE]) set.store_code = row[idx.BR_CODE].trim();
+
+      if (idx.package_size !== undefined && row[idx.package_size]) {
+        const m = PACKAGE_SIZE_RE.exec(row[idx.package_size].trim());
+        if (m) {
+          set.package_size = parseFloat(m[1]);
+          set.package_unit = m[2].toUpperCase();
+        } else {
+          packageSizeSkipped.push({ p_code: pcode, package_size: row[idx.package_size].trim() });
+        }
+      }
+
+      if (idx.our_price !== undefined && row[idx.our_price] !== '' && row[idx.our_price] !== undefined) {
+        set.our_price = row[idx.our_price].trim();
+      }
+      if (idx.product_mrp !== undefined && row[idx.product_mrp] !== '' && row[idx.product_mrp] !== undefined) {
+        set.product_mrp = row[idx.product_mrp].trim();
+      }
+      if (idx.quantity !== undefined && row[idx.quantity] !== '' && row[idx.quantity] !== undefined) {
+        set.store_quantity = Number(row[idx.quantity]) || 0;
+      }
+      if (idx.store_code_status !== undefined && row[idx.store_code_status]) {
+        set.pcode_status = row[idx.store_code_status].trim().toUpperCase() === 'N' ? 'N' : 'Y';
+      }
+
+      if (Object.keys(set).length === 0) continue;
+
+      await ProductMaster.updateOne({ _id: current._id }, { $set: set });
+      updated++;
+
+      if (set.our_price !== undefined) {
+        const before = parseFloat(current.our_price ? current.our_price.toString() : '0');
+        const after = parseFloat(set.our_price);
+        if (!Number.isNaN(after) && Math.abs(before - after) > 0.01) priceChanged++;
+      }
+      if (set.pcode_status !== undefined && set.pcode_status !== current.pcode_status) {
+        statusChanged++;
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Updated ${updated} of ${dataRows.length} product(s) from the CSV`,
+      data: {
+        total_rows: dataRows.length,
+        updated,
+        price_changed: priceChanged,
+        status_changed: statusChanged,
+        skipped_not_found: skippedNotFound.length,
+        skipped_not_found_codes: skippedNotFound.slice(0, 50),
+        package_size_not_updated: packageSizeSkipped.length,
+        package_size_not_updated_details: packageSizeSkipped.slice(0, 20)
+      }
+    });
+  } catch (error) {
+    console.error('Bulk update CSV error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error processing CSV',
       error: error.message
     });
   }
