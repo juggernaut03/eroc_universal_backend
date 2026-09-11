@@ -60,6 +60,7 @@ const normalizeSubcategoriesInput = (rawSubcategories) => {
     const {
       sub_category_id,
       subcategory_id,
+      reference_type,
       store_code,
       position,
       metadata,
@@ -89,6 +90,12 @@ const normalizeSubcategoriesInput = (rawSubcategories) => {
 
     const normalizedItem = {
       sub_category_id: resolvedSubCategoryId.toString().trim(),
+      // Was falling into ...rest above and landing in metadata instead of
+      // this top-level field — the enrichment logic reads item.reference_type
+      // directly (see buildEnrichmentMaps/resolveCategoryDetails), so a
+      // 'category'-typed tile saved via this route was silently treated as
+      // the 'subcategory' default no matter what the admin picked.
+      reference_type: reference_type === 'category' ? 'category' : 'subcategory',
       position: normalizedPosition,
       metadata: normalizedMetadata
     };

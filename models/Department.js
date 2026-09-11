@@ -33,6 +33,15 @@ const departmentSchema = new mongoose.Schema({
     type: Number,
     required: [true, 'Sequence ID is required']
   },
+  // Storefront visibility toggle, set from the admin panel — same
+  // convention as Category.is_visible / Subcategory.is_visible. Defaults
+  // true so every pre-existing department (created before this field
+  // existed) keeps showing exactly as before. Admin routes ignore this —
+  // the admin panel always sees everything regardless of value.
+  is_visible: {
+    type: Boolean,
+    default: true
+  },
   project_code: {
     type: String,
     trim: true
@@ -49,7 +58,9 @@ departmentSchema.index({ dept_type_id: 1 });
 departmentSchema.index({ sequence_id: 1 });
 departmentSchema.index({ store_code: 1, sequence_id: 1 });
 
-// Static method to find departments by store code
+// Static method to find departments by store code (storefront-facing —
+// hidden departments are excluded; admin routes query the model directly
+// instead of via this static, so they see everything)
 departmentSchema.statics.findByStoreCode = function (storeCode) {
   let query;
   if (storeCode === 'null' || storeCode === null) {
@@ -58,17 +69,18 @@ departmentSchema.statics.findByStoreCode = function (storeCode) {
   } else {
     query = { store_code: storeCode };
   }
+  query.is_visible = { $ne: false };
   return this.find(query).sort({ sequence_id: 1 });
 };
 
-// Static method to find all departments sorted by sequence
+// Static method to find all departments sorted by sequence (storefront-facing)
 departmentSchema.statics.findAllSorted = function () {
-  return this.find().sort({ sequence_id: 1 });
+  return this.find({ is_visible: { $ne: false } }).sort({ sequence_id: 1 });
 };
 
-// Static method to find departments by type
+// Static method to find departments by type (storefront-facing)
 departmentSchema.statics.findByType = function (deptTypeId, storeCode = null) {
-  const query = { dept_type_id: deptTypeId };
+  const query = { dept_type_id: deptTypeId, is_visible: { $ne: false } };
 
   if (storeCode) {
     query.store_code = storeCode;
