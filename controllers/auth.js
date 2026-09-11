@@ -398,11 +398,20 @@ const verifyOtp = async (req, res) => {
         try {
           const rule = await LoyaltyRule.findOne({ event: 'REGISTRATION', status: 'ACTIVE' });
           if (!rule) return;
+          // Keyed by mobile, not user._id: `isNewlyVerified` only proves this
+          // is the first verification of *this* User document, but deleting
+          // the account and re-registering with the same number creates a
+          // brand-new User._id with isVerified reset to false — so this
+          // block runs again, and a _id-scoped key never collided with the
+          // original credit. LoyaltyAccount itself is already keyed by
+          // mobile (see getOrCreateAccount), so scoping the idempotency key
+          // the same way makes the second attempt hit the unique index and
+          // come back as `duplicate` instead of crediting twice.
           const result = await creditPoints({
             user,
             points: rule.pointsValue,
             source: 'REGISTRATION',
-            idempotencyKey: `REGISTRATION_${user._id}`,
+            idempotencyKey: `REGISTRATION_${user.mobile}`,
             status: 'COMPLETED'
           });
           if (!result.duplicate) {
