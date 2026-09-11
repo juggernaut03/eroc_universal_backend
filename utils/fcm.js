@@ -270,11 +270,25 @@ const sendNotificationToAllUsers = async (users, title, body, data = {}, project
     return await sendNotificationToMultipleUsers(users, title, body, data, projectCode);
 };
 
+/**
+ * Drop a tenant's cached Firebase app so the next send re-reads
+ * Project.secrets.firebase_service_account_json from the database — call
+ * this whenever that field is saved from the admin panel, or a corrected
+ * credential silently keeps sending through the stale cached app until the
+ * process restarts (the exact bug already hit once with the Razorpay
+ * client cache).
+ * @param {string} projectCode
+ */
+const clearFirebaseAppCache = (projectCode) => {
+    if (projectCode) namedApps.delete(projectCode);
+};
+
 module.exports = {
     initializeFirebase: initializeDefaultFirebase,
     getFirebaseApp,
     sendNotification,
     sendNotificationToUser,
     sendNotificationToMultipleUsers,
-    sendNotificationToAllUsers
+    sendNotificationToAllUsers,
+    clearFirebaseAppCache
 };

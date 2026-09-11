@@ -5,6 +5,7 @@ const { checkPermission, requireSuperAdmin } = require('../../middleware/checkPe
 const { clearTenantCache } = require('../../middleware/tenant');
 const { clearSecretsCache } = require('../../utils/tenantIntegrations');
 const { clearClientCache } = require('../../utils/razorpayService');
+const { clearFirebaseAppCache } = require('../../utils/fcm');
 
 // Branding/app settings ride on the dynamicSection permission group like
 // other merchandised content. requireProjectAccess (mounted on /api/admin)
@@ -62,7 +63,7 @@ const INTEGRATION_FIELDS = ['razorpay_key_id', 'currency', 'google_maps_api_key'
 
 // Write-only. Stored on project.secrets (select: false) and never returned by
 // any endpoint — the panel shows whether one is set, never its value.
-const SECRET_FIELDS = ['razorpay_key_secret', 'sms_api_key'];
+const SECRET_FIELDS = ['razorpay_key_secret', 'sms_api_key', 'firebase_service_account_json'];
 
 const COLOR_FIELDS = EDITABLE_FIELDS.filter((f) => f.endsWith('_color'));
 const HEX_COLOR = /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
@@ -197,7 +198,7 @@ router.get('/integrations', requireSuperAdmin, async (req, res) => {
     // secrets are select:false — ask for them explicitly, and only to report
     // whether they exist.
     const project = await Project.findOne({ project_code: req.tenant.projectCode })
-      .select('+secrets.razorpay_key_secret +secrets.sms_api_key')
+      .select('+secrets.razorpay_key_secret +secrets.sms_api_key +secrets.firebase_service_account_json')
       .lean();
 
     if (!project) {
@@ -297,6 +298,21 @@ router.put('/secrets', requireSuperAdmin, async (req, res) => {
     for (const field of SECRET_FIELDS) {
       if (!(field in body)) continue;
       const value = String(body[field] ?? '').trim();
+
+      // The service account is pasted/uploaded as raw JSON — catch a
+      // malformed paste here rather than storing something getFirebaseApp()
+      // can only fail on at send time.
+      if (field === 'firebase_service_account_json' && value) {
+        try {
+          JSON.parse(value);
+        } catch {
+          return res.status(400).json({
+            success: false,
+            message: 'firebase_service_account_json must be valid JSON',
+          });
+        }
+      }
+
       // An empty string is a deliberate clear; the panel sends the field only
       // when the admin typed something or asked to remove it.
       $set[`secrets.${field}`] = value;
@@ -334,6 +350,7 @@ router.put('/secrets', requireSuperAdmin, async (req, res) => {
     clearTenantCache();
     clearSecretsCache();
     clearClientCache();
+    clearFirebaseAppCache(req.tenant.projectCode);
 
     res.status(200).json({
       success: true,
