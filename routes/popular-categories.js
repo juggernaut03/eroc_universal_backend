@@ -60,6 +60,7 @@ const normalizeSubcategoriesInput = (rawSubcategories) => {
     const {
       sub_category_id,
       subcategory_id,
+      reference_type,
       store_code,
       position,
       metadata,
@@ -89,6 +90,13 @@ const normalizeSubcategoriesInput = (rawSubcategories) => {
 
     const normalizedItem = {
       sub_category_id: resolvedSubCategoryId.toString().trim(),
+      // Was falling into ...rest above and landing in metadata instead of
+      // this top-level field — the enrichment logic reads item.reference_type
+      // directly (see buildEnrichmentMaps/resolveCategoryDetails), so a
+      // 'category'-typed tile saved via this route was silently treated as
+      // the 'subcategory' default no matter what the admin picked (see
+      // routes/seasonal-categories.js, where this same field was added first).
+      reference_type: reference_type === 'category' ? 'category' : 'subcategory',
       position: normalizedPosition,
       metadata: normalizedMetadata
     };
@@ -178,7 +186,14 @@ const buildEnrichmentMaps = async (sections) => {
   sections.forEach((section) => {
     const items = Array.isArray(section.subcategories) ? section.subcategories : [];
     items.forEach((item) => {
-      addCandidateId(subcategoryIds, item.sub_category_id);
+      // An explicit reference_type of 'category' means sub_category_id is a
+      // Category id, not a Subcategory id — resolve it there directly rather
+      // than through the ambiguous subcategory-first fallback below.
+      if (item.reference_type === 'category') {
+        addCandidateId(categoryIds, item.sub_category_id);
+      } else {
+        addCandidateId(subcategoryIds, item.sub_category_id);
+      }
 
       if (item?.metadata && typeof item.metadata === 'object') {
         const { metadata } = item;
@@ -236,6 +251,16 @@ const buildEnrichmentMaps = async (sections) => {
 const resolveCategoryDetails = (item, subcategoryDetails, categoryMap) => {
   const metadata = item?.metadata && typeof item.metadata === 'object' ? item.metadata : {};
 
+  // Explicit and first: sub_category_id names a Category directly, so it
+  // must win over any metadata guesswork or a same-numbered subcategory's
+  // own parent below.
+  if (item.reference_type === 'category') {
+    const direct = toSafeString(item.sub_category_id);
+    if (direct && categoryMap.has(direct)) {
+      return categoryMap.get(direct);
+    }
+  }
+
   const candidateCategoryIds = [
     metadata.category_id,
     metadata.idcategory_master,
@@ -245,7 +270,7 @@ const resolveCategoryDetails = (item, subcategoryDetails, categoryMap) => {
     subcategoryDetails?.category_id
   ];
 
-  if (!subcategoryDetails) {
+  if (!subcategoryDetails && item.reference_type !== 'category') {
     candidateCategoryIds.push(item.sub_category_id);
   }
 
@@ -317,6 +342,27 @@ const resolveSubcategoryUrl = (item, subcategoryDetails) => {
 };
 
 const enrichSubcategoryItem = (item, subcategoryMap, categoryMap) => {
+  // A category-typed item's id was never added to subcategoryIds (see
+  // buildEnrichmentMaps), but skip the subcategory map explicitly rather
+  // than relying on that — a *different* tile in the same batch can put the
+  // same number into subcategoryMap as a genuine subcategory, and this item
+  // must not accidentally pick that up.
+  if (item.reference_type === 'category') {
+    const categoryDetails = resolveCategoryDetails(item, null, categoryMap);
+    const imageLink = resolveImageLink(item, null, categoryDetails);
+    const categoryUrl = resolveCategoryUrl(item, null, categoryDetails);
+
+    return {
+      ...item,
+      redirect_url: toSafeString(item.redirect_url) || categoryUrl || null,
+      subcategory_details: null,
+      category_details: categoryDetails,
+      image_link: imageLink,
+      category_url: categoryUrl,
+      subcategory_url: null
+    };
+  }
+
   const baseSubcategoryId = toSafeString(item.sub_category_id);
   const metadata = item?.metadata && typeof item.metadata === 'object' ? item.metadata : {};
   const metadataSubcategoryId = toSafeString(metadata.sub_category_id || metadata.idsub_category_master);
@@ -362,8 +408,16 @@ const enrichPopularCategorySections = async (sections) => {
       // An item that names a subcategory but resolves to none was either a
       // dangling reference or — the common case now — points at a
       // subcategory an admin just hid from the storefront. Drop the tile
-      // rather than showing it with its name/image missing.
-      .filter((item) => !(toSafeString(item.sub_category_id) && !item.subcategory_details))
+      // rather than showing it with its name/image missing. A category-typed
+      // item is judged on category_details instead — subcategory_details is
+      // always null for those, which the old subcategory-only check would
+      // have wrongly treated as "unresolved" and dropped every one of them.
+      .filter((item) => {
+        if (!toSafeString(item.sub_category_id)) return true;
+        return item.reference_type === 'category'
+          ? Boolean(item.category_details)
+          : Boolean(item.subcategory_details);
+      })
   }));
 };
 
