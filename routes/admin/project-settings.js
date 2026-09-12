@@ -53,6 +53,10 @@ const EDITABLE_FIELDS = [
 
   // Home screen rollout.
   'home_feed_enabled',
+
+  // Which pre-installed launcher icon is currently active. See the schema
+  // comment on Project.config.active_app_icon.
+  'active_app_icon',
 ];
 
 // Publishable integration values. Split out because they are edited on the
@@ -69,6 +73,7 @@ const COLOR_FIELDS = EDITABLE_FIELDS.filter((f) => f.endsWith('_color'));
 const HEX_COLOR = /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
 
 const SPLASH_ANIMATIONS = ['fade', 'scale', 'fade_scale', 'none'];
+const APP_ICON_VARIANTS = ['default', 'festival', 'premium'];
 
 // Numeric fields, with the range the mobile app can actually render.
 const NUMERIC_FIELDS = {
@@ -90,6 +95,10 @@ function validateField(field, value) {
 
   if (field === 'splash_animation' && !SPLASH_ANIMATIONS.includes(value)) {
     return `splash_animation must be one of: ${SPLASH_ANIMATIONS.join(', ')}`;
+  }
+
+  if (field === 'active_app_icon' && !APP_ICON_VARIANTS.includes(value)) {
+    return `active_app_icon must be one of: ${APP_ICON_VARIANTS.join(', ')}`;
   }
 
   const numeric = NUMERIC_FIELDS[field];

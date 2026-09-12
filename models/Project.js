@@ -77,6 +77,13 @@ const projectSchema = new mongoose.Schema(
       // from POST /api/home/feed; anything else keeps the layout compiled
       // into the app.
       home_feed_enabled: { type: String, default: '' },
+      // Which pre-installed launcher icon the app should be showing right
+      // now (campaign/seasonal branding switched without a store update —
+      // every variant is baked into the app binary at build time; this only
+      // picks which already-shipped one is active). The app reads this at
+      // launch and calls the platform's icon-switch API; nothing happens
+      // for a build that never bundled the variant being asked for.
+      active_app_icon: { type: String, enum: ['default', 'festival', 'premium'], default: 'default' },
     },
     // Server-side only credentials (never returned by public endpoints).
     secrets: {
