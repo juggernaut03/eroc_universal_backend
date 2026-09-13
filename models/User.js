@@ -81,6 +81,19 @@ const userSchema = new mongoose.Schema({
     type: [String],
     default: []
   },
+  // Store-level restriction WITHIN whichever project(s) this admin can
+  // access — for a store manager who should only see their own store's
+  // data on a multi-store tenant (e.g. Shree Mega Mart's BHANPURI vs its
+  // other locations). Deliberately flat, not a per-project map: an admin
+  // always belongs to exactly one project when this is set (enforced in
+  // routes/admin/permissions.js), so there is no ambiguity about which
+  // project a store code belongs to. Empty/unset = unrestricted, i.e. every
+  // store in the admin's project(s) — today's behavior, unchanged, so no
+  // existing admin is affected until a super admin explicitly sets this.
+  allowed_store_codes: {
+    type: [String],
+    default: undefined
+  },
   // Gate for the image-CDN tools (barcode-image pool, per-tenant sync, manual
   // upload). Deliberately separate from `isSuperAdmin` and from `permissions`:
   // every other permission check in this file bypasses for isSuperAdmin (see
@@ -376,6 +389,17 @@ userSchema.methods.touchActivity = function (now = new Date(), capGapMs = 5 * 60
 userSchema.methods.isActiveWithin = function (windowMs = 10 * 60 * 1000) {
   if (!this.lastActiveAt) return false;
   return (Date.now() - new Date(this.lastActiveAt).getTime()) <= windowMs;
+};
+
+// Whether this admin may see/act on `storeCode`. The single source of truth
+// for store-level access — called both from requireStoreAccess (middleware,
+// store_code known up front) and inline in route handlers (store_code only
+// known after loading a record by id). See allowed_store_codes above for why
+// empty means unrestricted.
+userSchema.methods.canAccessStore = function (storeCode) {
+  if (this.isSuperAdmin) return true;
+  if (!this.allowed_store_codes || this.allowed_store_codes.length === 0) return true;
+  return this.allowed_store_codes.includes(storeCode);
 };
 
 module.exports = require('./tenantModel')('User', userSchema);

@@ -3,6 +3,7 @@ const router = express.Router();
 const { requireSuperAdmin } = require('../../middleware/checkPermission');
 const { getTenantDb, DEFAULT_DB_NAME } = require('../../config/database');
 const { getProjectModel } = require('../../models/Project');
+require('../../models/Store');
 
 // Admin accounts always live in the admin-home DB, regardless of which
 // project (tenant) is currently selected in the panel.
@@ -16,7 +17,7 @@ const VALID_SECTIONS = ['dashboard', 'users', 'orders', 'notifications', 'ecomme
 const VALID_ACTIONS = ['view', 'create', 'edit', 'delete'];
 const DASHBOARD_ACTIONS = ['view']; // Dashboard only supports view
 
-const ADMIN_FIELDS = 'name email mobile role isSuperAdmin permissions allowed_project_codes createdAt';
+const ADMIN_FIELDS = 'name email mobile role isSuperAdmin permissions allowed_project_codes allowed_store_codes createdAt';
 
 // Validate an incoming allowed_project_codes array against the registry.
 // Returns { codes } on success or { error } on failure.
@@ -37,6 +38,54 @@ const validateProjectCodes = async (codes) => {
   return { codes: normalized };
 };
 
+// Validate an incoming allowed_store_codes array against `projectCode`'s
+// own Store collection. Returns { codes } on success or { error } on
+// failure. An empty/absent array is always valid — it means "no
+// restriction", not "restricted to nothing".
+const validateStoreCodes = async (codes, projectCode) => {
+  if (codes === undefined || codes === null) return { codes: [] };
+  if (!Array.isArray(codes) || codes.some((c) => typeof c !== 'string')) {
+    return { error: 'allowed_store_codes must be an array of store code strings' };
+  }
+  const normalized = [...new Set(codes.map((c) => c.trim().toUpperCase()).filter(Boolean))];
+  if (normalized.length === 0) return { codes: [] };
+
+  const Project = getProjectModel();
+  const project = await Project.findOne({ project_code: projectCode }).select('db_name').lean();
+  if (!project) {
+    return { error: `Unknown project code: ${projectCode}` };
+  }
+
+  const Store = getTenantDb(project.db_name).models.Store;
+  const found = await Store.find({ store_code: { $in: normalized } })
+    .select('store_code -_id')
+    .lean();
+  const known = new Set(found.map((s) => s.store_code));
+  const unknown = normalized.filter((c) => !known.has(c));
+  if (unknown.length) {
+    return { error: `Unknown store code(s) for ${projectCode}: ${unknown.join(', ')}` };
+  }
+  return { codes: normalized };
+};
+
+// Shared by create/update: validates allowed_store_codes against the
+// admin's (single) project. Store access is deliberately flat, not a
+// per-project map — an admin restricted to specific stores must belong to
+// exactly one project, or "which project does this store code belong to"
+// is ambiguous. Returns { codes } on success or { error } on failure.
+const resolveStoreCodes = async (storeCodes, projectCodes) => {
+  const hasStoreCodes = Array.isArray(storeCodes) && storeCodes.length > 0;
+  if (!hasStoreCodes) return { codes: [] };
+
+  if (projectCodes.length !== 1) {
+    return {
+      error: 'allowed_store_codes can only be set when the admin has exactly one project in allowed_project_codes'
+    };
+  }
+
+  return validateStoreCodes(storeCodes, projectCodes[0]);
+};
+
 const applyPermissions = (admin, permissions) => {
   for (const section of VALID_SECTIONS) {
     if (permissions[section]) {
@@ -50,6 +99,45 @@ const applyPermissions = (admin, permissions) => {
   }
   admin.markModified('permissions');
 };
+
+// @route   GET /api/admin/permissions/projects/:projectCode/stores
+// @desc    List a specific project's stores, regardless of which project is
+//          currently selected in the panel — what the Admin Permissions
+//          page uses to build the store checklist for whichever project an
+//          admin is being scoped to.
+// @access  Super Admin
+router.get('/projects/:projectCode/stores', async (req, res) => {
+  try {
+    const projectCode = req.params.projectCode.trim().toUpperCase();
+    const Project = getProjectModel();
+    const project = await Project.findOne({ project_code: projectCode }).select('db_name').lean();
+    if (!project) {
+      return res.status(404).json({ success: false, message: `Unknown project code: ${projectCode}` });
+    }
+
+    const Store = getTenantDb(project.db_name).models.Store;
+    const stores = await Store.find({})
+      .select('store_code mobile_outlet_name is_enabled')
+      .sort({ store_code: 1 })
+      .lean();
+
+    res.status(200).json({
+      success: true,
+      data: stores.map((s) => ({
+        store_code: s.store_code,
+        store_name: s.mobile_outlet_name,
+        is_enabled: s.is_enabled === 'Enabled'
+      }))
+    });
+  } catch (error) {
+    console.error('Get project stores error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error fetching project stores',
+      error: error.message
+    });
+  }
+});
 
 // @route   GET /api/admin/permissions/admins
 // @desc    List all admin users with their permissions and project access
@@ -108,7 +196,7 @@ router.get('/admins/:id', async (req, res) => {
 // @access  Super Admin
 router.post('/admins', async (req, res) => {
   try {
-    const { mobile, name, email, permissions, allowed_project_codes } = req.body;
+    const { mobile, name, email, permissions, allowed_project_codes, allowed_store_codes } = req.body;
 
     if (!mobile || !/^\d{10}$/.test(String(mobile).trim())) {
       return res.status(400).json({
@@ -134,6 +222,11 @@ router.post('/admins', async (req, res) => {
       });
     }
 
+    const { codes: storeCodes, error: storeError } = await resolveStoreCodes(allowed_store_codes, codes);
+    if (storeError) {
+      return res.status(400).json({ success: false, message: storeError });
+    }
+
     const User = HomeUser();
     const existing = await User.findOne({ mobile: String(mobile).trim() });
     if (existing) {
@@ -152,7 +245,8 @@ router.post('/admins', async (req, res) => {
       role: 'admin',
       isSuperAdmin: false,
       isVerified: true,
-      allowed_project_codes: codes
+      allowed_project_codes: codes,
+      allowed_store_codes: storeCodes.length ? storeCodes : undefined
     });
 
     if (permissions && typeof permissions === 'object') {
@@ -169,6 +263,7 @@ router.post('/admins', async (req, res) => {
         name: admin.name,
         mobile: admin.mobile,
         allowed_project_codes: admin.allowed_project_codes,
+        allowed_store_codes: admin.allowed_store_codes || [],
         permissions: admin.permissions
       }
     });
@@ -187,12 +282,12 @@ router.post('/admins', async (req, res) => {
 // @access  Super Admin
 router.put('/admins/:id', async (req, res) => {
   try {
-    const { permissions, allowed_project_codes } = req.body;
+    const { permissions, allowed_project_codes, allowed_store_codes } = req.body;
 
-    if (!permissions && !allowed_project_codes) {
+    if (!permissions && !allowed_project_codes && allowed_store_codes === undefined) {
       return res.status(400).json({
         success: false,
-        message: 'Provide permissions and/or allowed_project_codes to update'
+        message: 'Provide permissions, allowed_project_codes, and/or allowed_store_codes to update'
       });
     }
 
@@ -225,6 +320,17 @@ router.put('/admins/:id', async (req, res) => {
       admin.allowed_project_codes = codes;
     }
 
+    if (allowed_store_codes !== undefined) {
+      const { codes: storeCodes, error: storeError } = await resolveStoreCodes(
+        allowed_store_codes,
+        admin.allowed_project_codes
+      );
+      if (storeError) {
+        return res.status(400).json({ success: false, message: storeError });
+      }
+      admin.allowed_store_codes = storeCodes.length ? storeCodes : undefined;
+    }
+
     await admin.save();
 
     res.status(200).json({
@@ -235,6 +341,7 @@ router.put('/admins/:id', async (req, res) => {
         name: admin.name,
         mobile: admin.mobile,
         allowed_project_codes: admin.allowed_project_codes,
+        allowed_store_codes: admin.allowed_store_codes || [],
         permissions: admin.permissions
       }
     });

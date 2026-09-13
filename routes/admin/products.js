@@ -5,7 +5,7 @@ const Product = require('../../models/Product');
 const ProductMaster = require('../../models/ProductMaster');
 const Subcategory = require('../../models/Subcategory');
 const SubcategoryProductMap = require('../../models/SubcategoryProductMap');
-const { checkPermission } = require('../../middleware/checkPermission');
+const { checkPermission, requireStoreAccess } = require('../../middleware/checkPermission');
 const { enforceProductLimit } = require('../../middleware/subscription');
 
 // A single CSV, small enough to hold in memory (a few thousand rows is at
@@ -164,7 +164,7 @@ router.get('/', viewPerm, async (req, res) => {
 // @route   POST /api/admin/products/by-store
 // @desc    Get products by store_code with search and filters (using ProductMaster)
 // @access  Admin
-router.post('/by-store', viewPerm, async (req, res) => {
+router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
   try {
     const {
       store_code,
@@ -728,7 +728,7 @@ router.post('/bulk-update-status', editPerm, async (req, res) => {
 // @route   POST /api/admin/products/master
 // @desc    Create new ProductMaster entry
 // @access  Admin (ecommerce:create)
-router.post('/master', createPerm, enforceProductLimit(), async (req, res) => {
+router.post('/master', createPerm, requireStoreAccess, enforceProductLimit(), async (req, res) => {
   try {
     const product = await ProductMaster.create(req.body);
 
@@ -764,6 +764,26 @@ router.post('/master', createPerm, enforceProductLimit(), async (req, res) => {
 // @access  Admin (ecommerce:edit)
 router.put('/master/:id', editPerm, async (req, res) => {
   try {
+    // store_code is only known once the record is loaded, unlike
+    // /by-store or /master (create) where it's already in the request —
+    // so the access check happens here instead of via requireStoreAccess.
+    // 404 rather than 403: a store-restricted admin shouldn't learn a
+    // product in another store even exists.
+    const existing = await ProductMaster.findById(req.params.id).select('store_code');
+    if (!existing || !req.user.canAccessStore(existing.store_code)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+    // Also block moving the product to a store this admin can't reach.
+    if (req.body.store_code && !req.user.canAccessStore(req.body.store_code)) {
+      return res.status(403).json({
+        success: false,
+        message: `You do not have access to store ${req.body.store_code}`
+      });
+    }
+
     const product = await ProductMaster.findByIdAndUpdate(
       req.params.id,
       req.body,
@@ -802,6 +822,14 @@ router.put('/master/:id', editPerm, async (req, res) => {
 // @access  Admin (ecommerce:delete)
 router.delete('/master/:id', deletePerm, async (req, res) => {
   try {
+    const existing = await ProductMaster.findById(req.params.id).select('store_code');
+    if (!existing || !req.user.canAccessStore(existing.store_code)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Product not found'
+      });
+    }
+
     const product = await ProductMaster.findByIdAndDelete(req.params.id);
 
     if (!product) {
@@ -863,12 +891,28 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
       return res.status(400).json({ success: false, message: 'CSV file is required (field name "file")' });
     }
 
-    // Optional — scopes the match to the admin panel's currently-selected
-    // store, so a tenant with more than one store can't have one store's
-    // upload silently touch a same-numbered p_code that actually belongs
-    // to a different store. Omitted, it matches by p_code alone (fine for
-    // the common case: one store per tenant).
+    // Optional for an unrestricted admin — scopes the match to the admin
+    // panel's currently-selected store, so a tenant with more than one
+    // store can't have one store's upload silently touch a same-numbered
+    // p_code that actually belongs to a different store. Omitted, it
+    // matches by p_code alone (fine for the common case: one store per
+    // tenant). Mandatory for a store-restricted admin: without it, a p_code
+    // match spans every store in the tenant, which would let a store
+    // manager's upload silently edit another store's catalog.
     const storeCode = typeof req.body.store_code === 'string' ? req.body.store_code.trim() : '';
+
+    if (!storeCode && req.user.allowed_store_codes && req.user.allowed_store_codes.length > 0) {
+      return res.status(400).json({
+        success: false,
+        message: 'store_code is required for your account'
+      });
+    }
+    if (storeCode && !req.user.canAccessStore(storeCode)) {
+      return res.status(403).json({
+        success: false,
+        message: `You do not have access to store ${storeCode}`
+      });
+    }
 
     const rows = parseCsvBuffer(req.file.buffer);
     if (rows.length < 2) {

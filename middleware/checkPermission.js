@@ -65,4 +65,32 @@ const requireProjectAccess = (req, res, next) => {
   next();
 };
 
-module.exports = { checkPermission, requireSuperAdmin, requireProjectAccess, requireImageCdnAccess };
+/**
+ * Store scoping for admins, one level below requireProjectAccess. Only
+ * blocks when the request actually names a store_code (body or query) that
+ * this admin can't see — see User.canAccessStore for what "can't see"
+ * means (empty allowed_store_codes = every store in their project(s)).
+ *
+ * This only covers routes where store_code is known up front. A
+ * get/update/delete-by-id route only learns the record's store_code after
+ * loading it, so those call req.user.canAccessStore(doc.store_code) inline
+ * instead — see routes/admin/products.js and routes/admin/orders.js.
+ */
+const requireStoreAccess = (req, res, next) => {
+  const storeCode = req.body?.store_code || req.query?.store_code;
+  if (storeCode && !req.user.canAccessStore(storeCode)) {
+    return res.status(403).json({
+      success: false,
+      message: `You do not have access to store ${storeCode}`
+    });
+  }
+  next();
+};
+
+module.exports = {
+  checkPermission,
+  requireSuperAdmin,
+  requireProjectAccess,
+  requireImageCdnAccess,
+  requireStoreAccess
+};

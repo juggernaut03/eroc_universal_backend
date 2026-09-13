@@ -1425,7 +1425,14 @@ router.delete('/pincodes/:id', outDelete, async (req, res) => {
 // @access  Admin
 router.get('/stores/codes', outView, async (req, res) => {
   try {
-    const stores = await Store.find({ is_enabled: 'Enabled' })
+    // A store-restricted admin only ever sees their own store(s) here — this
+    // is what backs the admin panel's store switcher/dropdown, so a
+    // restricted admin never even sees another store's code to pick from.
+    const query = { is_enabled: 'Enabled' };
+    if (req.user.allowed_store_codes && req.user.allowed_store_codes.length > 0) {
+      query.store_code = { $in: req.user.allowed_store_codes };
+    }
+    const stores = await Store.find(query)
       .select('store_code mobile_outlet_name')
       .sort({ store_code: 1 });
 

@@ -40,6 +40,35 @@ const withStoreNames = async (orders) => {
   }));
 };
 
+/**
+ * Mongo filter restricting a query to a store-restricted admin's own
+ * store(s) — {} (no-op) for an unrestricted admin/super admin. Orders have
+ * no per-request store_code the way /by-store does for products, so list
+ * and stats queries need this injected rather than a simple presence check.
+ */
+const storeScope = (req) =>
+  req.user.allowed_store_codes && req.user.allowed_store_codes.length > 0
+    ? { store_code: { $in: req.user.allowed_store_codes } }
+    : {};
+
+/**
+ * Loads one order by id, returning null if it doesn't exist OR belongs to a
+ * store this admin can't access — callers respond 404 either way, so a
+ * store-restricted admin can't tell "wrong id" from "not your store". Full
+ * Mongoose document by default (callers that need instance methods like
+ * order.updateStatus()); pass { lean: true } for read-only routes.
+ */
+const loadAccessibleOrder = async (req, id, { projection, lean = false } = {}) => {
+  const query = Order.findById(id);
+  // store_code is always needed for the access check below, regardless of
+  // what the caller actually wants back.
+  if (projection) query.select(`${projection} store_code`);
+  if (lean) query.lean();
+  const order = await query;
+  if (!order || !req.user.canAccessStore(order.store_code)) return null;
+  return order;
+};
+
 // @route   GET /api/admin/orders
 // @desc    Get all orders with filtering and pagination
 // @access  Admin
@@ -59,7 +88,7 @@ router.get('/', checkPermission('orders', 'view'), async (req, res) => {
 
     // Build query. Conditions go through $and because both the search filter
     // and the Payment Processing status bucket need their own $or.
-    const query = {};
+    const query = { ...storeScope(req) };
     const conditions = [];
 
     // Search by order number or mobile number
@@ -140,7 +169,7 @@ router.get('/', checkPermission('orders', 'view'), async (req, res) => {
 // @access  Admin
 router.get('/:id', checkPermission('orders', 'view'), async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id).lean();
+    const order = await loadAccessibleOrder(req, req.params.id, { lean: true });
 
     if (!order) {
       return res.status(404).json({
@@ -172,9 +201,10 @@ router.get('/:id', checkPermission('orders', 'view'), async (req, res) => {
 // @access  Admin
 router.get('/:id/history', checkPermission('orders', 'view'), async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id)
-      .select('order_number order_status status_history order_placed_at order_confirmed_at order_completed_at actual_delivery_date cancelled_at cancel_reason last_updated_at createdAt updatedAt')
-      .lean();
+    const order = await loadAccessibleOrder(req, req.params.id, {
+      lean: true,
+      projection: 'order_number order_status status_history order_placed_at order_confirmed_at order_completed_at actual_delivery_date cancelled_at cancel_reason last_updated_at createdAt updatedAt store_code'
+    });
 
     if (!order) {
       return res.status(404).json({
@@ -219,7 +249,7 @@ router.patch('/:id/status', checkPermission('orders', 'edit'), async (req, res) 
       });
     }
 
-    const order = await Order.findById(req.params.id);
+    const order = await loadAccessibleOrder(req, req.params.id);
 
     if (!order) {
       return res.status(404).json({
@@ -285,18 +315,19 @@ router.patch('/:id/payment-status', checkPermission('orders', 'edit'), async (re
       updateData['payment_info.transaction_id'] = transactionId;
     }
 
-    const order = await Order.findByIdAndUpdate(
-      req.params.id,
-      updateData,
-      { new: true, runValidators: true }
-    );
-
-    if (!order) {
+    const existing = await loadAccessibleOrder(req, req.params.id, { projection: '_id' });
+    if (!existing) {
       return res.status(404).json({
         success: false,
         message: 'Order not found'
       });
     }
+
+    const order = await Order.findByIdAndUpdate(
+      req.params.id,
+      updateData,
+      { new: true, runValidators: true }
+    );
 
     // Create in-app notification for the user (API-based, no Firebase)
     if (order.mobile_no) {
@@ -342,18 +373,19 @@ router.put('/:id', checkPermission('orders', 'edit'), async (req, res) => {
       last_updated_at: new Date()
     };
 
-    const order = await Order.findByIdAndUpdate(
-      req.params.id,
-      updateData,
-      { new: true, runValidators: true }
-    );
-
-    if (!order) {
+    const existing = await loadAccessibleOrder(req, req.params.id, { projection: '_id' });
+    if (!existing) {
       return res.status(404).json({
         success: false,
         message: 'Order not found'
       });
     }
+
+    const order = await Order.findByIdAndUpdate(
+      req.params.id,
+      updateData,
+      { new: true, runValidators: true }
+    );
 
     if (requestedStatus && normalizeStatus(requestedStatus) !== normalizeStatus(order.order_status)) {
       await order.updateStatus(requestedStatus, adminActor(req.user));
@@ -379,7 +411,7 @@ router.put('/:id', checkPermission('orders', 'edit'), async (req, res) => {
 // @access  Admin
 router.delete('/:id', checkPermission('orders', 'delete'), async (req, res) => {
   try {
-    const order = await Order.findById(req.params.id);
+    const order = await loadAccessibleOrder(req, req.params.id);
 
     if (!order) {
       return res.status(404).json({
@@ -425,7 +457,7 @@ router.get('/stats/status-counts', checkPermission('orders', 'view'), async (req
   try {
     const { search = '', startDate = '', endDate = '' } = req.query;
 
-    const baseQuery = {};
+    const baseQuery = { ...storeScope(req) };
 
     if (search) {
       baseQuery.$or = [
@@ -474,10 +506,12 @@ router.get('/stats/status-counts', checkPermission('orders', 'view'), async (req
 // @access  Admin
 router.get('/stats/overview', checkPermission('orders', 'view'), async (req, res) => {
   try {
-    const totalOrders = await Order.countDocuments();
+    const scope = storeScope(req);
+    const totalOrders = await Order.countDocuments(scope);
 
     // Get orders by status
     const statusCounts = await Order.aggregate([
+      { $match: scope },
       {
         $group: {
           _id: '$order_status',
@@ -488,6 +522,7 @@ router.get('/stats/overview', checkPermission('orders', 'view'), async (req, res
 
     // Get payment status counts
     const paymentStatusCounts = await Order.aggregate([
+      { $match: scope },
       {
         $group: {
           _id: '$payment_info.payment_status',
@@ -500,6 +535,7 @@ router.get('/stats/overview', checkPermission('orders', 'view'), async (req, res
     const revenueStats = await Order.aggregate([
       {
         $match: {
+          ...scope,
           order_status: { $nin: NON_REVENUE_STATUSES }
         }
       },
@@ -517,12 +553,14 @@ router.get('/stats/overview', checkPermission('orders', 'view'), async (req, res
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const todayOrders = await Order.countDocuments({
+      ...scope,
       order_placed_at: { $gte: today }
     });
 
     // Get this month's orders
     const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
     const monthOrders = await Order.countDocuments({
+      ...scope,
       order_placed_at: { $gte: firstDayOfMonth }
     });
 
@@ -586,6 +624,7 @@ router.get('/stats/revenue', checkPermission('orders', 'view'), async (req, res)
     const revenueByDate = await Order.aggregate([
       {
         $match: {
+          ...storeScope(req),
           order_placed_at: {
             $gte: new Date(startDate),
             $lte: new Date(endDate)
@@ -644,7 +683,12 @@ router.post('/bulk-update-status', checkPermission('orders', 'edit'), async (req
     // Done as one bulkWrite rather than updateMany so each order can record
     // its own from_status on the timeline — updateMany has no way to reference
     // the value it is replacing.
-    const targets = await Order.find({ _id: { $in: orderIds } })
+    //
+    // storeScope filters this to the admin's own store(s) up front — a
+    // store-restricted admin who submits someone else's store's order id
+    // just has it silently dropped from the batch, same as a nonexistent id
+    // already was.
+    const targets = await Order.find({ _id: { $in: orderIds }, ...storeScope(req) })
       .select('_id order_status')
       .lean();
 
