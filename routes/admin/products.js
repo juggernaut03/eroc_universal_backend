@@ -1002,6 +1002,12 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
       success: true,
       message: `Updated ${updated} of ${dataRows.length} product(s) from the CSV`,
       data: {
+        // Echoes back exactly what this update was matched against, so the
+        // panel can confirm it after the fact — a wrong project/store
+        // selected at upload time shows up here as skipped_not_found near
+        // total_rows, not as a silent no-op.
+        project_code: req.tenant.projectCode,
+        store_code: storeCode || null,
         total_rows: dataRows.length,
         updated,
         price_changed: priceChanged,
