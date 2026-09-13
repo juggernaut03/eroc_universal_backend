@@ -145,12 +145,17 @@ router.get('/projects/:projectCode/stores', async (req, res) => {
 router.get('/admins', async (req, res) => {
   try {
     const admins = await HomeUser().find({ role: 'admin' })
-      .select(ADMIN_FIELDS)
-      .sort({ createdAt: -1 });
+      .select(`${ADMIN_FIELDS} +password`)
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // password is select:false on the schema for a reason — pulled in only
+    // to compute this flag, then stripped before it ever reaches the panel.
+    const data = admins.map(({ password, ...rest }) => ({ ...rest, hasPassword: !!password }));
 
     res.status(200).json({
       success: true,
-      data: admins
+      data
     });
   } catch (error) {
     console.error('Get admin users error:', error);
@@ -168,7 +173,8 @@ router.get('/admins', async (req, res) => {
 router.get('/admins/:id', async (req, res) => {
   try {
     const admin = await HomeUser().findOne({ _id: req.params.id, role: 'admin' })
-      .select(ADMIN_FIELDS);
+      .select(`${ADMIN_FIELDS} +password`)
+      .lean();
 
     if (!admin) {
       return res.status(404).json({
@@ -177,9 +183,11 @@ router.get('/admins/:id', async (req, res) => {
       });
     }
 
+    const { password, ...data } = admin;
+
     res.status(200).json({
       success: true,
-      data: admin
+      data: { ...data, hasPassword: !!password }
     });
   } catch (error) {
     console.error('Get admin permissions error:', error);
@@ -196,7 +204,7 @@ router.get('/admins/:id', async (req, res) => {
 // @access  Super Admin
 router.post('/admins', async (req, res) => {
   try {
-    const { mobile, name, email, permissions, allowed_project_codes, allowed_store_codes } = req.body;
+    const { mobile, name, email, password, permissions, allowed_project_codes, allowed_store_codes } = req.body;
 
     if (!mobile || !/^\d{10}$/.test(String(mobile).trim())) {
       return res.status(400).json({
@@ -208,6 +216,14 @@ router.post('/admins', async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'name is required'
+      });
+    }
+    // Optional — an admin created without one can't log in until a super
+    // admin sets it later (PUT /admins/:id also accepts password, for that).
+    if (password !== undefined && password !== '' && String(password).length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 6 characters'
       });
     }
 
@@ -249,6 +265,10 @@ router.post('/admins', async (req, res) => {
       allowed_store_codes: storeCodes.length ? storeCodes : undefined
     });
 
+    if (password) {
+      admin.password = String(password); // hashed by the User pre-save hook
+    }
+
     if (permissions && typeof permissions === 'object') {
       applyPermissions(admin, permissions);
     }
@@ -282,12 +302,18 @@ router.post('/admins', async (req, res) => {
 // @access  Super Admin
 router.put('/admins/:id', async (req, res) => {
   try {
-    const { permissions, allowed_project_codes, allowed_store_codes } = req.body;
+    const { permissions, allowed_project_codes, allowed_store_codes, password } = req.body;
 
-    if (!permissions && !allowed_project_codes && allowed_store_codes === undefined) {
+    if (!permissions && !allowed_project_codes && allowed_store_codes === undefined && !password) {
       return res.status(400).json({
         success: false,
-        message: 'Provide permissions, allowed_project_codes, and/or allowed_store_codes to update'
+        message: 'Provide permissions, allowed_project_codes, allowed_store_codes, and/or password to update'
+      });
+    }
+    if (password && String(password).length < 6) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password must be at least 6 characters'
       });
     }
 
@@ -329,6 +355,10 @@ router.put('/admins/:id', async (req, res) => {
         return res.status(400).json({ success: false, message: storeError });
       }
       admin.allowed_store_codes = storeCodes.length ? storeCodes : undefined;
+    }
+
+    if (password) {
+      admin.password = String(password); // hashed by the User pre-save hook
     }
 
     await admin.save();
