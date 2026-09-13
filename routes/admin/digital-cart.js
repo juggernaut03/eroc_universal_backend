@@ -3,6 +3,7 @@ const multer = require('multer');
 const router = express.Router();
 const DigitalCartItem = require('../../models/DigitalCartItem');
 const DigitalCartSettings = require('../../models/DigitalCartSettings');
+const { getTenantDb } = require('../../config/database');
 const { checkPermission } = require('../../middleware/checkPermission');
 const { parseDigitalCartCsv } = require('../../utils/digitalCartCsv');
 const { buildGroups } = require('../../utils/digitalCartGroups');
@@ -81,6 +82,19 @@ router.post(
         return res.status(400).json({ success: false, message: 'No CSV file uploaded (field name: "file")' });
       }
 
+      // Resolved explicitly rather than via the ambient DigitalCartItem
+      // import: for a large enough multipart upload, Node's
+      // AsyncLocalStorage context (which the ambient tenant-model proxy
+      // depends on) does not reliably survive multer/busboy's file-stream
+      // parsing — past some size the request-scoped tenant context is lost
+      // and the proxy silently falls back to the default tenant DB instead
+      // of erroring. For a deleteMany({})+insertMany this is not just a
+      // wrong result, it can wipe and overwrite the DEFAULT tenant's real
+      // digital cart with another tenant's sheet. req.tenant is a plain
+      // property set before multer ever runs, so it's unaffected — resolve
+      // the model from it directly instead of trusting ALS this far in.
+      const DigitalCartItemTenant = getTenantDb(req.tenant.project.db_name).models.DigitalCartItem;
+
       const { items, error } = parseDigitalCartCsv(req.file.buffer.toString('utf8'));
       if (error) {
         return res.status(400).json({ success: false, message: error });
@@ -89,8 +103,8 @@ router.post(
       const sourceFile = req.file.originalname || 'upload.csv';
       const docs = items.map((item) => ({ ...item, source_file: sourceFile }));
 
-      await DigitalCartItem.deleteMany({});
-      await DigitalCartItem.insertMany(docs);
+      await DigitalCartItemTenant.deleteMany({});
+      await DigitalCartItemTenant.insertMany(docs);
 
       res.status(201).json({
         success: true,

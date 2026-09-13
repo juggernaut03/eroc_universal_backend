@@ -5,6 +5,7 @@ const Product = require('../../models/Product');
 const ProductMaster = require('../../models/ProductMaster');
 const Subcategory = require('../../models/Subcategory');
 const SubcategoryProductMap = require('../../models/SubcategoryProductMap');
+const { getTenantDb } = require('../../config/database');
 const { checkPermission, requireStoreAccess } = require('../../middleware/checkPermission');
 const { enforceProductLimit } = require('../../middleware/subscription');
 
@@ -891,6 +892,18 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
       return res.status(400).json({ success: false, message: 'CSV file is required (field name "file")' });
     }
 
+    // Resolved explicitly rather than via the ambient ProductMaster import:
+    // for a large enough multipart upload, Node's AsyncLocalStorage context
+    // (which the ambient tenant-model proxy depends on) does not reliably
+    // survive multer/busboy's file-stream parsing — past some size the
+    // request-scoped tenant context is lost and the proxy silently falls
+    // back to the default tenant DB instead of erroring, so every row in a
+    // real-sized CSV looks "not found" while the response still (correctly)
+    // echoes the intended project_code. req.tenant is a plain property set
+    // before multer ever runs, so it's unaffected — resolve the model from
+    // it directly instead of trusting ALS this far into the request.
+    const ProductMasterTenant = getTenantDb(req.tenant.project.db_name).models.ProductMaster;
+
     // Optional for an unrestricted admin — scopes the match to the admin
     // panel's currently-selected store, so a tenant with more than one
     // store can't have one store's upload silently touch a same-numbered
@@ -931,7 +944,7 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
     const matchQuery = { p_code: { $in: pcodes } };
     if (storeCode) matchQuery.store_code = storeCode;
 
-    const existing = await ProductMaster.find(matchQuery)
+    const existing = await ProductMasterTenant.find(matchQuery)
       .select('p_code our_price pcode_status');
     const existingByPcode = new Map(existing.map((p) => [p.p_code, p]));
 
@@ -985,7 +998,7 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
 
       if (Object.keys(set).length === 0) continue;
 
-      await ProductMaster.updateOne({ _id: current._id }, { $set: set });
+      await ProductMasterTenant.updateOne({ _id: current._id }, { $set: set });
       updated++;
 
       if (set.our_price !== undefined) {
