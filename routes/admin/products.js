@@ -3,6 +3,8 @@ const multer = require('multer');
 const router = express.Router();
 const Product = require('../../models/Product');
 const ProductMaster = require('../../models/ProductMaster');
+const Department = require('../../models/Department');
+const Category = require('../../models/Category');
 const Subcategory = require('../../models/Subcategory');
 const SubcategoryProductMap = require('../../models/SubcategoryProductMap');
 const { getTenantDb } = require('../../config/database');
@@ -175,6 +177,10 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
       dept_id = '',
       category_id = '',
       sub_category_id = '',
+      // "Show only products missing a valid department/category/subcategory"
+      // — mutually exclusive with the three filters above (a product with
+      // no valid classification can't sensibly be narrowed to one).
+      unclassified_only = false,
       // 'active' | 'inactive' | 'all'. Used to hardcode pcode_status: 'Y'
       // here unconditionally — meaning an inactive product could never be
       // found at all through this list, search included, with no way to
@@ -222,16 +228,42 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
     }
 
     // Add optional filters
-    if (dept_id) {
-      query.dept_id = dept_id;
-    }
+    if (unclassified_only) {
+      // A product's dept_id/category_id/sub_category_id is a free-typed
+      // string reference, not a real Mongo reference — nothing stops it
+      // from pointing at a department/category/subcategory that has since
+      // been renamed to a new id or deleted outright. Tenant-wide (not
+      // store-scoped) validity check: flag a product the moment any one of
+      // its three references doesn't match a real document, anywhere in
+      // this tenant's catalog tree.
+      const [validDeptIds, validCategoryIds, validSubCategoryIds] = await Promise.all([
+        Department.distinct('department_id'),
+        Category.distinct('idcategory_master'),
+        Subcategory.distinct('idsub_category_master')
+      ]);
+      const unclassifiedOr = [
+        { dept_id: { $nin: validDeptIds } },
+        { category_id: { $nin: validCategoryIds } },
+        { sub_category_id: { $nin: validSubCategoryIds } }
+      ];
+      if (query.$or) {
+        query.$and = [{ $or: query.$or }, { $or: unclassifiedOr }];
+        delete query.$or;
+      } else {
+        query.$or = unclassifiedOr;
+      }
+    } else {
+      if (dept_id) {
+        query.dept_id = dept_id;
+      }
 
-    if (category_id) {
-      query.category_id = category_id;
-    }
+      if (category_id) {
+        query.category_id = category_id;
+      }
 
-    if (sub_category_id) {
-      query.sub_category_id = sub_category_id;
+      if (sub_category_id) {
+        query.sub_category_id = sub_category_id;
+      }
     }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
