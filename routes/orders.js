@@ -165,7 +165,11 @@ router.get('/my-orders', protect, async (req, res, next) => {
         unit_price: item.unit_price,
         quantity: item.quantity,
         total_price: item.total_price,
-        uom: item.package_unit
+        uom: item.package_unit,
+        // Set once an admin edits this line post-placement — see
+        // models/Order.js orderItemSchema. Absent on every untouched line.
+        removed: item.removed || undefined,
+        original_quantity: item.original_quantity
       }))
     }));
 

@@ -147,6 +147,12 @@ const createOrderItemChangedNotification = async (user, orderNumber, changeType,
         action: 'order_item_changed',
         changeType,
         productName,
+        // The app's push-tap handler navigates by this field alone (see
+        // firebase_notification_service.dart's _handleMessageNavigation) —
+        // there's no deep-link route for one specific order yet, only the
+        // list, so this lands the customer somewhere they can find the
+        // change rather than at a dead end.
+        url: '/my-orders',
         ...(oldQuantity !== undefined ? { oldQuantity: String(oldQuantity) } : {}),
         ...(newQuantity !== undefined ? { newQuantity: String(newQuantity) } : {})
     };
