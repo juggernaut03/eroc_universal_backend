@@ -1,10 +1,13 @@
 /**
  * Notification Service
- * Creates in-app notifications for order events (no Firebase push)
+ * Creates in-app notifications for order events. Most of these are in-app
+ * only (no Firebase push) — createOrderItemChangedNotification is the
+ * exception, since it also pushes via FCM.
  */
 
 const Notification = require('../models/Notification');
 const { normalizeStatus } = require('../constants/orderStatus');
+const fcm = require('./fcm');
 
 /**
  * Create notification when user places an order
@@ -119,8 +122,63 @@ const createPaymentStatusNotification = async (userId, orderNumber, paymentStatu
     }
 };
 
+/**
+ * Notify a customer that an admin edited an already-placed order: a line's
+ * quantity was changed, or a line was removed entirely. Unlike the other
+ * notifications in this file, this one also pushes via FCM — an admin
+ * changing what's actually going to arrive needs to reach the customer
+ * even if the app isn't open, not just wait in their in-app list.
+ * @param {import('mongoose').Document} user - full User document (needs fcmToken)
+ * @param {string} orderNumber
+ * @param {'quantity'|'removed'} changeType
+ * @param {Object} details - { productName, oldQuantity?, newQuantity? }
+ * @param {string} [projectCode] - tenant, to send via its own Firebase project
+ */
+const createOrderItemChangedNotification = async (user, orderNumber, changeType, details, projectCode) => {
+    const { productName, oldQuantity, newQuantity } = details;
+
+    const title = changeType === 'removed' ? 'Item Removed from Your Order 📝' : 'Order Quantity Updated 📝';
+    const body = changeType === 'removed'
+        ? `Order #${orderNumber}: ${productName} was removed from your order. Your order total has been updated.`
+        : `Order #${orderNumber}: ${productName} quantity changed from ${oldQuantity} to ${newQuantity}. Your order total has been updated.`;
+
+    const data = {
+        orderNumber,
+        action: 'order_item_changed',
+        changeType,
+        productName,
+        ...(oldQuantity !== undefined ? { oldQuantity: String(oldQuantity) } : {}),
+        ...(newQuantity !== undefined ? { newQuantity: String(newQuantity) } : {})
+    };
+
+    try {
+        await Notification.create({
+            user: user._id,
+            title,
+            body,
+            type: 'order',
+            data
+        });
+    } catch (error) {
+        console.error('Error creating order item change notification:', error);
+    }
+
+    if (!user.fcmToken) {
+        console.log(`📝 Order item change: no FCM token for user ${user._id}, in-app only`);
+        return;
+    }
+
+    try {
+        await fcm.sendNotificationToUser(user, title, body, data, projectCode);
+        console.log(`📝 Push sent: order item change #${orderNumber} (${changeType})`);
+    } catch (error) {
+        console.error('Error sending order item change push:', error.message);
+    }
+};
+
 module.exports = {
     createOrderPlacedNotification,
     createOrderStatusNotification,
-    createPaymentStatusNotification
+    createPaymentStatusNotification,
+    createOrderItemChangedNotification
 };

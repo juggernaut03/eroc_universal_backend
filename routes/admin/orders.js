@@ -2,7 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Order = require('../../models/Order');
 const User = require('../../models/User');
-const { createOrderStatusNotification, createPaymentStatusNotification } = require('../../utils/notificationService');
+const { createOrderStatusNotification, createPaymentStatusNotification, createOrderItemChangedNotification } = require('../../utils/notificationService');
 const { checkPermission } = require('../../middleware/checkPermission');
 const {
   ORDER_STATUS,
@@ -67,6 +67,39 @@ const loadAccessibleOrder = async (req, id, { projection, lean = false } = {}) =
   const order = await query;
   if (!order || !req.user.canAccessStore(order.store_code)) return null;
   return order;
+};
+
+const round2 = (value) => Math.round((Number(value) + Number.EPSILON) * 100) / 100;
+// Tax rate is baked into subtotal already (see utils/orderService.js) —
+// this only recomputes the informational breakdown, never adds to the
+// total, same convention as the checkout-time calculation.
+const TAX_RATE = 0.18;
+const includedTax = (amount) => round2((amount * TAX_RATE) / (1 + TAX_RATE));
+
+/**
+ * Recomputes order_summary from the current order_items after an admin
+ * edits a line's quantity or removes it — subtotal/total_items/
+ * total_quantity/total_amount/tax_amount only. Deliberately leaves
+ * discount_amount, delivery_charges, packing_fee, applied_offer, and
+ * applied_loyalty_redemption untouched: those were locked in against the
+ * cart the customer actually checked out with, and re-evaluating offer/
+ * loyalty eligibility against a now-smaller cart could retroactively take
+ * away a discount the customer was already promised. A discount that's now
+ * disproportionate to the edited order is a judgment call for the admin to
+ * make separately, not something this recompute does automatically.
+ */
+const recomputeOrderSummary = (order) => {
+  const activeItems = order.order_items.filter((item) => !item.removed);
+  const subtotal = round2(activeItems.reduce((sum, item) => sum + item.total_price, 0));
+  const discountAmount = order.order_summary.discount_amount || 0;
+  const deliveryCharges = order.order_summary.delivery_charges || 0;
+  const packingFee = order.order_summary.packing_fee || 0;
+
+  order.order_summary.subtotal = subtotal;
+  order.order_summary.total_items = activeItems.length;
+  order.order_summary.total_quantity = activeItems.reduce((sum, item) => sum + item.quantity, 0);
+  order.order_summary.total_amount = round2(subtotal + deliveryCharges + packingFee - discountAmount);
+  order.order_summary.tax_amount = includedTax(subtotal - discountAmount);
 };
 
 // @route   GET /api/admin/orders
@@ -347,6 +380,145 @@ router.patch('/:id/payment-status', checkPermission('orders', 'edit'), async (re
     res.status(500).json({
       success: false,
       message: 'Error updating payment status',
+      error: error.message
+    });
+  }
+});
+
+// @route   PATCH /api/admin/orders/:id/items/:pcode/quantity
+// @desc    Change one line's quantity on an already-placed order (stock
+//          shortfall, packing correction, etc). Recomputes order_summary
+//          and pushes a notification to the customer.
+// @access  Admin
+router.patch('/:id/items/:pcode/quantity', checkPermission('orders', 'edit'), async (req, res) => {
+  try {
+    const quantity = Number(req.body.quantity);
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      return res.status(400).json({
+        success: false,
+        message: 'quantity must be a whole number of at least 1 — use the remove endpoint to take a line out entirely'
+      });
+    }
+
+    const order = await loadAccessibleOrder(req, req.params.id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const item = order.order_items.find((i) => i.p_code === req.params.pcode && !i.removed);
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        message: 'This product is not an active line on this order (wrong p_code, or already removed)'
+      });
+    }
+
+    if (item.quantity === quantity) {
+      return res.status(200).json({ success: true, message: 'Quantity unchanged', data: order });
+    }
+
+    const oldQuantity = item.quantity;
+    if (item.original_quantity === undefined) item.original_quantity = oldQuantity;
+    item.quantity = quantity;
+    item.total_price = round2(item.unit_price * quantity);
+    item.edited_at = new Date();
+    item.edited_by_name = adminActor(req.user).name;
+
+    recomputeOrderSummary(order);
+    order.last_updated_at = new Date();
+    order.markModified('order_items');
+    await order.save();
+
+    if (order.mobile_no) {
+      const user = await User.findOne({ mobile: order.mobile_no });
+      if (user) {
+        createOrderItemChangedNotification(
+          user,
+          order.order_number,
+          'quantity',
+          { productName: item.product_name, oldQuantity, newQuantity: quantity },
+          req.tenant?.projectCode
+        );
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `Quantity for ${item.product_name} updated to ${quantity}`,
+      data: order
+    });
+  } catch (error) {
+    console.error('Update order item quantity error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error updating item quantity',
+      error: error.message
+    });
+  }
+});
+
+// @route   PATCH /api/admin/orders/:id/items/:pcode/remove
+// @desc    Soft-remove one line from an already-placed order (out of
+//          stock, unavailable, etc) — the line stays on the order marked
+//          removed (shown strikethrough), never deleted. Recomputes
+//          order_summary and pushes a notification to the customer.
+// @access  Admin
+router.patch('/:id/items/:pcode/remove', checkPermission('orders', 'edit'), async (req, res) => {
+  try {
+    const order = await loadAccessibleOrder(req, req.params.id);
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    const item = order.order_items.find((i) => i.p_code === req.params.pcode && !i.removed);
+    if (!item) {
+      return res.status(404).json({
+        success: false,
+        message: 'This product is not an active line on this order (wrong p_code, or already removed)'
+      });
+    }
+
+    const activeCount = order.order_items.filter((i) => !i.removed).length;
+    if (activeCount <= 1) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cannot remove the last item on an order — cancel the order instead'
+      });
+    }
+
+    if (item.original_quantity === undefined) item.original_quantity = item.quantity;
+    item.removed = true;
+    item.edited_at = new Date();
+    item.edited_by_name = adminActor(req.user).name;
+
+    recomputeOrderSummary(order);
+    order.last_updated_at = new Date();
+    order.markModified('order_items');
+    await order.save();
+
+    if (order.mobile_no) {
+      const user = await User.findOne({ mobile: order.mobile_no });
+      if (user) {
+        createOrderItemChangedNotification(
+          user,
+          order.order_number,
+          'removed',
+          { productName: item.product_name },
+          req.tenant?.projectCode
+        );
+      }
+    }
+
+    res.status(200).json({
+      success: true,
+      message: `${item.product_name} removed from the order`,
+      data: order
+    });
+  } catch (error) {
+    console.error('Remove order item error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Error removing item',
       error: error.message
     });
   }

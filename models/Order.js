@@ -54,6 +54,27 @@ const orderItemSchema = new mongoose.Schema({
   pcode_img: {
     type: String,
     trim: true
+  },
+  // Set only on the FIRST admin edit to this line, so it always holds what
+  // the customer actually ordered — a second edit doesn't overwrite it with
+  // an already-edited value. Absent = never edited.
+  original_quantity: {
+    type: Number,
+    min: [1, 'Original quantity must be at least 1']
+  },
+  // Soft-removed, not deleted — the line stays in order_items (rendered
+  // strikethrough) so the order's history stays honest about what was
+  // actually ordered vs. what shipped.
+  removed: {
+    type: Boolean,
+    default: false
+  },
+  edited_at: {
+    type: Date
+  },
+  edited_by_name: {
+    type: String,
+    trim: true
   }
 }, { _id: false });
 
