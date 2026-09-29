@@ -228,6 +228,10 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
     }
 
     // Add optional filters
+    // Hoisted so the stats block below can reuse it for
+    // unclassified_active_count without recomputing the three distinct()
+    // calls a second time.
+    let unclassifiedOr = null;
     if (unclassified_only) {
       // A product's dept_id/category_id/sub_category_id is a free-typed
       // string reference, not a real Mongo reference — nothing stops it
@@ -241,7 +245,7 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
         Category.distinct('idcategory_master'),
         Subcategory.distinct('idsub_category_master')
       ]);
-      const unclassifiedOr = [
+      unclassifiedOr = [
         { dept_id: { $nin: validDeptIds } },
         { category_id: { $nin: validCategoryIds } },
         { sub_category_id: { $nin: validSubCategoryIds } }
@@ -342,6 +346,27 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
       pcode_img: product.pcode_img
     }));
 
+    // Store-wide counters for the header — deliberately ignore every filter
+    // above (department/category/search/status) so they read as a stable
+    // "how's this store doing overall" figure, not one that jumps around as
+    // someone types into search. unclassified_active_count only makes sense
+    // (and is only computed) while the Unclassified-only toggle is on.
+    const totalProducts = await ProductMaster.countDocuments({ store_code: store_code.trim() });
+    let inactiveCount = null;
+    let unclassifiedActiveCount = null;
+    if (unclassified_only && unclassifiedOr) {
+      unclassifiedActiveCount = await ProductMaster.countDocuments({
+        store_code: store_code.trim(),
+        pcode_status: 'Y',
+        $or: unclassifiedOr
+      });
+    } else {
+      inactiveCount = await ProductMaster.countDocuments({
+        store_code: store_code.trim(),
+        pcode_status: 'N'
+      });
+    }
+
     res.status(200).json({
       success: true,
       data: productsData,
@@ -350,6 +375,11 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
         limit: parseInt(limit),
         total,
         pages: Math.ceil(total / parseInt(limit))
+      },
+      stats: {
+        total_products: totalProducts,
+        inactive_count: inactiveCount,
+        unclassified_active_count: unclassifiedActiveCount
       }
     });
   } catch (error) {
