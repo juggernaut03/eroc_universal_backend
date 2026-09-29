@@ -349,9 +349,15 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
     // Store-wide counters for the header — deliberately ignore every filter
     // above (department/category/search/status) so they read as a stable
     // "how's this store doing overall" figure, not one that jumps around as
-    // someone types into search. unclassified_active_count only makes sense
-    // (and is only computed) while the Unclassified-only toggle is on.
+    // someone types into search. total_products/active_count are always
+    // computed; inactive_count/unclassified_active_count are mutually
+    // exclusive with each other, matching whichever side of the
+    // Unclassified-only toggle the request is on.
     const totalProducts = await ProductMaster.countDocuments({ store_code: store_code.trim() });
+    const activeCount = await ProductMaster.countDocuments({
+      store_code: store_code.trim(),
+      pcode_status: 'Y'
+    });
     let inactiveCount = null;
     let unclassifiedActiveCount = null;
     if (unclassified_only && unclassifiedOr) {
@@ -378,6 +384,7 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
       },
       stats: {
         total_products: totalProducts,
+        active_count: activeCount,
         inactive_count: inactiveCount,
         unclassified_active_count: unclassifiedActiveCount
       }
