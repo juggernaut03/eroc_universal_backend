@@ -1,4 +1,5 @@
 const express = require('express');
+const mongoose = require('mongoose');
 const multer = require('multer');
 const router = express.Router();
 const Product = require('../../models/Product');
@@ -941,19 +942,43 @@ function parseCsvBuffer(buffer) {
 
 const PACKAGE_SIZE_RE = /^([0-9.]+)\s*([A-Za-z]+)$/;
 
+// A form field arrives as the string "true"/"false" (multipart never sends
+// real booleans) — this is also lenient about a bare "1".
+const toBool = (v) => v === true || v === 'true' || v === '1';
+
 // @route   POST /api/admin/products/bulk-update-csv
 // @desc    Store admins periodically re-export their own rate/stock sheet
 //          (P_CODE, BARCODE, package_size, BRAND_NAME, BR_CODE, our_price,
 //          product_mrp, quantity, store_code_status) and upload it here to
 //          push a fresh price/stock/active-status snapshot into the
-//          catalog. Deliberately an UPDATE-only pass, matched by p_code:
-//          a p_code with no existing product is reported and skipped
+//          catalog. Default pass is UPDATE-only, matched by p_code+store:
+//          a combo with no existing product is reported and skipped
 //          rather than inserted, since this file carries no department/
 //          category to place a new product under (see
 //          scripts/update_shree_mega_mart_pricing.js, which this route
 //          productizes — same logic, now reusable by any tenant from the
 //          admin panel instead of a one-off CLI run). pcode_img and
 //          category placement are never touched.
+//
+//          Opt-in sync_mode=true turns this into a full daily reconcile,
+//          for a tenant whose store sends "everything active today" every
+//          day: (1) still updates every matched row's price/stock/status/
+//          name as above; (2) CREATES a (p_code, store) combo that's in
+//          the file but doesn't exist yet for that store, by cloning the
+//          department/category/subcategory from a sibling row of the same
+//          p_code in any other store — skipped (unresolvable) if no such
+//          sibling exists anywhere, since there's nowhere to classify a
+//          genuinely brand-new p_code; (3) DEACTIVATES (pcode_status ->
+//          'N') any product that's currently active for a store appearing
+//          in this file but whose p_code isn't in that store's rows today
+//          — never touches a store the file doesn't mention at all. Guarded
+//          against a partial/truncated file: if deactivating would drop
+//          more than half of a store's currently-active catalog, that
+//          store's deactivations are held back and reported in
+//          deactivation_blocked instead of applied, until the same file is
+//          resubmitted with confirm_deactivation=true. dry_run=true runs
+//          every computation and returns the would-be counts without
+//          writing anything, for previewing sync_mode before committing.
 // @access  Admin (ecommerce:edit)
 router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, res) => {
   try {
@@ -982,6 +1007,9 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
     // — despite the name, this tenant's exports use it for the store code,
     // not a brand code — so one file can refresh several stores at once.
     const bodyStoreCode = typeof req.body.store_code === 'string' ? req.body.store_code.trim() : '';
+    const syncMode = toBool(req.body.sync_mode);
+    const confirmDeactivation = toBool(req.body.confirm_deactivation);
+    const dryRun = toBool(req.body.dry_run);
 
     if (!bodyStoreCode && req.user.allowed_store_codes && req.user.allowed_store_codes.length > 0) {
       return res.status(400).json({
@@ -1081,7 +1109,9 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
 
       if (Object.keys(set).length === 0) continue;
 
-      await ProductMasterTenant.updateOne({ _id: current._id }, { $set: set });
+      if (!dryRun) {
+        await ProductMasterTenant.updateOne({ _id: current._id }, { $set: set });
+      }
       updated++;
 
       if (set.our_price !== undefined) {
@@ -1094,9 +1124,142 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
       }
     }
 
+    // ==== sync_mode: create newly-stocked combos, deactivate dropped ones ====
+    let created = 0;
+    const createdDetails = [];
+    const unresolvablePcodes = [];
+    let deactivated = 0;
+    const deactivatedCodes = [];
+    const deactivationBlocked = [];
+
+    if (syncMode) {
+      // --- Create: (p_code, store) combos the file mentions with no
+      // existing document, resolved via a sibling of the same p_code in
+      // ANY other store (not just the ones in this file) for its
+      // department/category/subcategory. ---
+      const missingRows = dataRows
+        .map((row) => ({ row, pcode: row[idx.P_CODE].trim(), targetStore: rowStoreCode(row) }))
+        .filter(({ pcode, targetStore }) => targetStore && !existingByKey.has(`${pcode}|${targetStore}`));
+
+      if (missingRows.length) {
+        const missingPcodes = [...new Set(missingRows.map((m) => m.pcode))];
+        const siblings = await ProductMasterTenant.find({ p_code: { $in: missingPcodes } })
+          .select('p_code dept_id category_id sub_category_id package_size package_unit brand_name product_name barcode max_quantity_allowed search_keyword project_code')
+          .lean();
+        const siblingByPcode = new Map();
+        for (const doc of siblings) {
+          if (!siblingByPcode.has(doc.p_code)) siblingByPcode.set(doc.p_code, doc);
+        }
+
+        // The same (p_code, store) can appear more than once if the source
+        // file has duplicate rows — collapse to the last occurrence rather
+        // than creating (or trying to) the same combo twice.
+        const toCreate = new Map();
+        for (const { row, pcode, targetStore } of missingRows) {
+          const sibling = siblingByPcode.get(pcode);
+          if (!sibling) {
+            unresolvablePcodes.push(pcode);
+            continue;
+          }
+
+          let packageSize = sibling.package_size;
+          let packageUnit = sibling.package_unit;
+          if (idx.package_size !== undefined && row[idx.package_size]) {
+            const m = PACKAGE_SIZE_RE.exec(row[idx.package_size].trim());
+            if (m) {
+              packageSize = parseFloat(m[1]);
+              packageUnit = m[2].toUpperCase();
+            }
+          }
+
+          const ourPriceRaw = idx.our_price !== undefined && row[idx.our_price] !== '' ? row[idx.our_price].trim() : null;
+          const productMrpRaw = idx.product_mrp !== undefined && row[idx.product_mrp] !== '' ? row[idx.product_mrp].trim() : null;
+          if (!ourPriceRaw || !productMrpRaw) {
+            unresolvablePcodes.push(pcode);
+            continue;
+          }
+
+          const quantity = idx.quantity !== undefined && row[idx.quantity] !== '' ? Number(row[idx.quantity]) || 0 : 0;
+          const statusRaw = idx.store_code_status !== undefined ? row[idx.store_code_status] : '';
+          const pcodeStatus = statusRaw && statusRaw.trim().toUpperCase() === 'N' ? 'N' : 'Y';
+
+          toCreate.set(`${pcode}|${targetStore}`, {
+            p_code: pcode,
+            barcode: (idx.BARCODE !== undefined && row[idx.BARCODE]) ? row[idx.BARCODE].trim() : (sibling.barcode || ''),
+            product_name: (idx.product_name !== undefined && row[idx.product_name]) ? row[idx.product_name].trim() : sibling.product_name,
+            package_size: packageSize,
+            package_unit: packageUnit,
+            product_mrp: mongoose.Types.Decimal128.fromString(productMrpRaw),
+            our_price: mongoose.Types.Decimal128.fromString(ourPriceRaw),
+            brand_name: (idx.BRAND_NAME !== undefined && row[idx.BRAND_NAME]) ? row[idx.BRAND_NAME].trim() : (sibling.brand_name || ''),
+            store_code: targetStore,
+            pcode_status: pcodeStatus,
+            dept_id: sibling.dept_id,
+            category_id: sibling.category_id,
+            sub_category_id: sibling.sub_category_id,
+            store_quantity: quantity,
+            max_quantity_allowed: sibling.max_quantity_allowed || 10,
+            search_keyword: sibling.search_keyword || undefined,
+            project_code: sibling.project_code || req.tenant.projectCode
+          });
+        }
+
+        const docsToCreate = [...toCreate.values()];
+        if (docsToCreate.length && !dryRun) {
+          await ProductMasterTenant.insertMany(docsToCreate, { ordered: false });
+        }
+        created = docsToCreate.length;
+        createdDetails.push(...docsToCreate.slice(0, 50).map((d) => `${d.p_code} (${d.store_code})`));
+      }
+
+      // --- Deactivate: active docs for a store this file mentions, whose
+      // p_code isn't among that store's rows today. A store the file
+      // doesn't mention at all is never touched. ---
+      const filePcodesByStore = new Map();
+      for (const row of dataRows) {
+        const store = rowStoreCode(row);
+        if (!store) continue;
+        if (!filePcodesByStore.has(store)) filePcodesByStore.set(store, new Set());
+        filePcodesByStore.get(store).add(row[idx.P_CODE].trim());
+      }
+
+      for (const store of storeCodesInFile) {
+        const filePcodes = filePcodesByStore.get(store) || new Set();
+        const currentActive = await ProductMasterTenant.find({ store_code: store, pcode_status: 'Y' })
+          .select('p_code -_id')
+          .lean();
+        const toDeactivate = currentActive.filter((d) => !filePcodes.has(d.p_code));
+        if (toDeactivate.length === 0) continue;
+
+        const ratio = toDeactivate.length / currentActive.length;
+        if (ratio > 0.5 && !confirmDeactivation) {
+          deactivationBlocked.push({
+            store_code: store,
+            active_count: currentActive.length,
+            would_deactivate: toDeactivate.length,
+            ratio: Math.round(ratio * 100) / 100
+          });
+          continue;
+        }
+
+        if (!dryRun) {
+          await ProductMasterTenant.updateMany(
+            { store_code: store, p_code: { $in: toDeactivate.map((d) => d.p_code) }, pcode_status: 'Y' },
+            { $set: { pcode_status: 'N' } }
+          );
+        }
+        deactivated += toDeactivate.length;
+        deactivatedCodes.push(...toDeactivate.slice(0, 50).map((d) => `${d.p_code} (${store})`));
+      }
+    }
+
+    const message = syncMode
+      ? `${dryRun ? '[Dry run] ' : ''}Sync: updated ${updated}, created ${created}, deactivated ${deactivated} of ${dataRows.length} row(s)`
+      : `Updated ${updated} of ${dataRows.length} product(s) from the CSV`;
+
     res.status(200).json({
       success: true,
-      message: `Updated ${updated} of ${dataRows.length} product(s) from the CSV`,
+      message,
       data: {
         // Echoes back exactly what this update was matched against, so the
         // panel can confirm it after the fact — a wrong project/store
@@ -1115,7 +1278,18 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
         skipped_not_found: skippedNotFound.length,
         skipped_not_found_codes: skippedNotFound.slice(0, 50),
         package_size_not_updated: packageSizeSkipped.length,
-        package_size_not_updated_details: packageSizeSkipped.slice(0, 20)
+        package_size_not_updated_details: packageSizeSkipped.slice(0, 20),
+        sync_mode: syncMode,
+        dry_run: dryRun,
+        created,
+        created_details: createdDetails,
+        unresolvable_pcodes: [...new Set(unresolvablePcodes)].slice(0, 50),
+        deactivated,
+        deactivated_codes: deactivatedCodes,
+        // Non-empty only when a store's deactivation was held back by the
+        // partial-file safety guard — resubmit the same file with
+        // confirm_deactivation=true to force it through.
+        deactivation_blocked: deactivationBlocked
       }
     });
   } catch (error) {
