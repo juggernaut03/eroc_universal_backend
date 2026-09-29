@@ -936,26 +936,26 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
     // it directly instead of trusting ALS this far into the request.
     const ProductMasterTenant = getTenantDb(req.tenant.project.db_name).models.ProductMaster;
 
-    // Optional for an unrestricted admin — scopes the match to the admin
-    // panel's currently-selected store, so a tenant with more than one
-    // store can't have one store's upload silently touch a same-numbered
-    // p_code that actually belongs to a different store. Omitted, it
-    // matches by p_code alone (fine for the common case: one store per
-    // tenant). Mandatory for a store-restricted admin: without it, a p_code
-    // match spans every store in the tenant, which would let a store
-    // manager's upload silently edit another store's catalog.
-    const storeCode = typeof req.body.store_code === 'string' ? req.body.store_code.trim() : '';
+    // A single global store_code (given in the body) forces every row to
+    // that one store — the common single-store upload, and mandatory for a
+    // store-restricted admin (without it, a p_code match would span every
+    // store in the tenant, letting a store manager's upload touch another
+    // store's catalog). Omitted, and when the file itself carries a
+    // BR_CODE column, each row is matched against its own BR_CODE instead
+    // — despite the name, this tenant's exports use it for the store code,
+    // not a brand code — so one file can refresh several stores at once.
+    const bodyStoreCode = typeof req.body.store_code === 'string' ? req.body.store_code.trim() : '';
 
-    if (!storeCode && req.user.allowed_store_codes && req.user.allowed_store_codes.length > 0) {
+    if (!bodyStoreCode && req.user.allowed_store_codes && req.user.allowed_store_codes.length > 0) {
       return res.status(400).json({
         success: false,
         message: 'store_code is required for your account'
       });
     }
-    if (storeCode && !req.user.canAccessStore(storeCode)) {
+    if (bodyStoreCode && !req.user.canAccessStore(bodyStoreCode)) {
       return res.status(403).json({
         success: false,
-        message: `You do not have access to store ${storeCode}`
+        message: `You do not have access to store ${bodyStoreCode}`
       });
     }
 
@@ -971,14 +971,25 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
     }
 
     const dataRows = rows.slice(1).filter((r) => r.length > 1 && r[idx.P_CODE] && r[idx.P_CODE].trim());
+
+    // The store each row matches against: the explicit body store_code
+    // wins when given; otherwise that row's own BR_CODE. A row with
+    // neither has nothing to match on and is reported, not guessed at.
+    const rowStoreCode = (row) =>
+      bodyStoreCode || (idx.BR_CODE !== undefined ? (row[idx.BR_CODE] || '').trim() : '');
+
     const pcodes = [...new Set(dataRows.map((r) => r[idx.P_CODE].trim()))];
+    const storeCodesInFile = [...new Set(dataRows.map(rowStoreCode).filter(Boolean))];
 
     const matchQuery = { p_code: { $in: pcodes } };
-    if (storeCode) matchQuery.store_code = storeCode;
+    if (storeCodesInFile.length) matchQuery.store_code = { $in: storeCodesInFile };
 
     const existing = await ProductMasterTenant.find(matchQuery)
-      .select('p_code our_price pcode_status');
-    const existingByPcode = new Map(existing.map((p) => [p.p_code, p]));
+      .select('p_code store_code our_price pcode_status');
+    // Keyed by p_code+store_code, not p_code alone — a multi-store file
+    // (BR_CODE varying per row) legitimately repeats the same p_code once
+    // per store, and each occurrence is a different real document.
+    const existingByKey = new Map(existing.map((p) => [`${p.p_code}|${p.store_code}`, p]));
 
     let updated = 0;
     let priceChanged = 0;
@@ -988,9 +999,10 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
 
     for (const row of dataRows) {
       const pcode = row[idx.P_CODE].trim();
-      const current = existingByPcode.get(pcode);
+      const targetStore = rowStoreCode(row);
+      const current = targetStore ? existingByKey.get(`${pcode}|${targetStore}`) : undefined;
       if (!current) {
-        skippedNotFound.push(pcode);
+        skippedNotFound.push(targetStore ? `${pcode} (${targetStore})` : pcode);
         continue;
       }
 
@@ -1003,7 +1015,9 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
       if (idx.BARCODE !== undefined && row[idx.BARCODE]) set.barcode = row[idx.BARCODE].trim();
       if (idx.product_name !== undefined && row[idx.product_name]) set.product_name = row[idx.product_name].trim();
       if (idx.BRAND_NAME !== undefined && row[idx.BRAND_NAME]) set.brand_name = row[idx.BRAND_NAME].trim();
-      if (idx.BR_CODE !== undefined && row[idx.BR_CODE]) set.store_code = row[idx.BR_CODE].trim();
+      // BR_CODE/store_code is used above only to pick which store's record
+      // this row updates — never written back; reassigning a product to a
+      // different store is a classification change, out of scope here.
 
       if (idx.package_size !== undefined && row[idx.package_size]) {
         const m = PACKAGE_SIZE_RE.exec(row[idx.package_size].trim());
@@ -1052,7 +1066,11 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
         // selected at upload time shows up here as skipped_not_found near
         // total_rows, not as a silent no-op.
         project_code: req.tenant.projectCode,
-        store_code: storeCode || null,
+        store_code: bodyStoreCode || null,
+        // Every distinct store actually matched against — populated even
+        // when store_code above is null (a multi-store, BR_CODE-driven
+        // upload has no single store_code to echo).
+        store_codes_matched: storeCodesInFile,
         total_rows: dataRows.length,
         updated,
         price_changed: priceChanged,
