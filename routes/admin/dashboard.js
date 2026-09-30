@@ -4,15 +4,57 @@ const User = require('../../models/User');
 const Product = require('../../models/Product');
 const Order = require('../../models/Order');
 const Category = require('../../models/Category');
-const { checkPermission } = require('../../middleware/checkPermission');
+const { checkPermission, requireStoreAccess } = require('../../middleware/checkPermission');
 const {
   ORDER_STATUS,
   NON_REVENUE_STATUSES,
   LEGACY_STATUS_ALIASES
 } = require('../../constants/orderStatus');
 
-// All dashboard routes require dashboard:view permission
+// All dashboard routes require dashboard:view permission, and — like every
+// other admin surface — respect store-level restriction. Unlike
+// products/orders (which require an explicit store_code up front),
+// dashboard queries default to full-tenant totals when nothing is
+// selected, so requireStoreAccess only rejects an explicit ?store_code an
+// admin isn't allowed to see; resolveStoreFilter below is what actually
+// pins a store-restricted admin's numbers to their own branch(es) even
+// when they never send store_code at all.
 router.use(checkPermission('dashboard', 'view'));
+router.use(requireStoreAccess);
+
+// Every KPI in this file is either an Order query (which carries its own
+// store_code) or a Users query (which doesn't — a customer isn't tied to
+// one branch). This resolves what to filter Orders by:
+//   - an explicit ?store_code, already access-checked by requireStoreAccess
+//     above — lets any admin (including an unrestricted one) drill into one
+//     branch, same as the store switcher elsewhere in the panel
+//   - otherwise, a store-restricted admin (allowed_store_codes set) is
+//     pinned to their own store(s) — never merged with a param, so an
+//     unattended request that simply omits store_code still can't fall
+//     through to the whole tenant
+//   - otherwise (unrestricted, nothing selected) null — today's behavior,
+//     full-tenant totals
+// Returns either a plain string (single store) or { $in: [...] } (a
+// restricted admin with more than one store) — both drop straight into a
+// Mongo match as `store_code: <result>`.
+function resolveStoreFilter(req) {
+  const explicit = req.query.store_code;
+  if (explicit) return explicit;
+  if (req.user.allowed_store_codes && req.user.allowed_store_codes.length > 0) {
+    return { $in: req.user.allowed_store_codes };
+  }
+  return null;
+}
+
+// Customers aren't tied to a store directly, so a store-scoped "users"
+// figure is derived from who has actually ordered from that store —
+// distinct mobile numbers off the Order collection, matched back to User.
+// Returns null when there's no store filter (nothing to restrict by).
+async function resolveStoreCustomerFilter(storeFilter) {
+  if (!storeFilter) return null;
+  const mobiles = await Order.distinct('mobile_no', { store_code: storeFilter });
+  return { mobile: { $in: mobiles } };
+}
 
 // @route   GET /api/admin/dashboard/overview
 // @desc    Get overall dashboard statistics
@@ -33,15 +75,37 @@ router.get('/overview', async (req, res) => {
     const lastMonth = new Date(today.getFullYear(), today.getMonth() - 1, 1);
     const lastMonthEnd = new Date(today.getFullYear(), today.getMonth(), 0);
 
-    // Users statistics
-    const totalUsers = await User.countDocuments();
-    const newUsersToday = await User.countDocuments({ createdAt: { $gte: today } });
-    const newUsersThisMonth = await User.countDocuments({ createdAt: { $gte: thisMonth } });
+    const storeFilter = resolveStoreFilter(req);
+    const orderBase = storeFilter ? { store_code: storeFilter } : {};
+    // Base for every Users query below — restricted to this store's
+    // customers when a store filter is active, {} (everyone) otherwise.
+    const userBase = (await resolveStoreCustomerFilter(storeFilter)) || {};
+
+    // Users statistics — role: 'user' excludes admin accounts, which were
+    // previously counted alongside real customers here.
+    const totalUsers = await User.countDocuments({ ...userBase, role: 'user' });
+    const newUsersToday = await User.countDocuments({
+      ...userBase,
+      role: 'user',
+      createdAt: { $gte: today }
+    });
+    const newUsersThisMonth = await User.countDocuments({
+      ...userBase,
+      role: 'user',
+      createdAt: { $gte: thisMonth }
+    });
     const newUsersLastMonth = await User.countDocuments({
+      ...userBase,
+      role: 'user',
       createdAt: { $gte: lastMonth, $lte: lastMonthEnd }
     });
 
-    // Products statistics
+    // Products statistics — reads the legacy Product catalog, which is a
+    // different, unpopulated collection from ProductMaster (what every
+    // other admin surface actually uses), so this already returns all
+    // zeros regardless of store. Left unscoped rather than pretending to
+    // fix a collection nothing writes to; the panel doesn't render this
+    // block today anyway.
     const totalProducts = await Product.countDocuments();
     const activeProducts = await Product.countDocuments({ status: 'active' });
     const outOfStock = await Product.countDocuments({ 'stock.quantity': 0 });
@@ -55,15 +119,17 @@ router.get('/overview', async (req, res) => {
     });
 
     // Orders statistics
-    const totalOrders = await Order.countDocuments();
-    const ordersToday = await Order.countDocuments({ order_placed_at: { $gte: today } });
-    const ordersThisWeek = await Order.countDocuments({ order_placed_at: { $gte: thisWeek } });
-    const ordersThisMonth = await Order.countDocuments({ order_placed_at: { $gte: thisMonth } });
+    const totalOrders = await Order.countDocuments(orderBase);
+    const ordersToday = await Order.countDocuments({ ...orderBase, order_placed_at: { $gte: today } });
+    const ordersThisWeek = await Order.countDocuments({ ...orderBase, order_placed_at: { $gte: thisWeek } });
+    const ordersThisMonth = await Order.countDocuments({ ...orderBase, order_placed_at: { $gte: thisMonth } });
     const ordersLastMonth = await Order.countDocuments({
+      ...orderBase,
       order_placed_at: { $gte: lastMonth, $lte: lastMonthEnd }
     });
 
     const pendingOrders = await Order.countDocuments({
+      ...orderBase,
       order_status: {
         $in: [
           ...LEGACY_STATUS_ALIASES[ORDER_STATUS.PENDING],
@@ -74,12 +140,14 @@ router.get('/overview', async (req, res) => {
     });
 
     const deliveredOrders = await Order.countDocuments({
+      ...orderBase,
       order_status: 'delivered'
     });
 
     // 'refunded' was folded into 'cancelled' when the status vocabulary was
     // aligned with the admin panel; only pre-rename documents still carry it.
     const refundedOrders = await Order.countDocuments({
+      ...orderBase,
       order_status: 'refunded'
     });
 
@@ -87,6 +155,7 @@ router.get('/overview', async (req, res) => {
     const revenueStats = await Order.aggregate([
       {
         $match: {
+          ...orderBase,
           order_status: { $nin: NON_REVENUE_STATUSES }
         }
       },
@@ -102,6 +171,7 @@ router.get('/overview', async (req, res) => {
     const revenueToday = await Order.aggregate([
       {
         $match: {
+          ...orderBase,
           order_placed_at: { $gte: today },
           order_status: { $nin: NON_REVENUE_STATUSES }
         }
@@ -117,6 +187,7 @@ router.get('/overview', async (req, res) => {
     const revenueThisMonth = await Order.aggregate([
       {
         $match: {
+          ...orderBase,
           order_placed_at: { $gte: thisMonth },
           order_status: { $nin: NON_REVENUE_STATUSES }
         }
@@ -132,6 +203,7 @@ router.get('/overview', async (req, res) => {
     const revenueLastMonth = await Order.aggregate([
       {
         $match: {
+          ...orderBase,
           order_placed_at: { $gte: lastMonth, $lte: lastMonthEnd },
           order_status: { $nin: NON_REVENUE_STATUSES }
         }
@@ -159,6 +231,11 @@ router.get('/overview', async (req, res) => {
 
     res.status(200).json({
       success: true,
+      // Echoes what was actually applied — the explicit selection, or the
+      // admin's own store(s) when one was silently pinned, or null for a
+      // genuine full-tenant view — so the panel can show which scope a
+      // restricted admin is looking at even if it never sent store_code.
+      store_code: storeFilter,
       data: {
         users: {
           total: totalUsers,
@@ -212,10 +289,12 @@ router.get('/sales-trend', async (req, res) => {
     const { days = 30 } = req.query;
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - parseInt(days));
+    const storeFilter = resolveStoreFilter(req);
 
     const salesTrend = await Order.aggregate([
       {
         $match: {
+          ...(storeFilter ? { store_code: storeFilter } : {}),
           order_placed_at: { $gte: startDate },
           order_status: { $nin: NON_REVENUE_STATUSES }
         }
@@ -253,10 +332,12 @@ router.get('/sales-trend', async (req, res) => {
 router.get('/top-products', async (req, res) => {
   try {
     const { limit = 10 } = req.query;
+    const storeFilter = resolveStoreFilter(req);
 
     const topProducts = await Order.aggregate([
       {
         $match: {
+          ...(storeFilter ? { store_code: storeFilter } : {}),
           order_status: { $nin: NON_REVENUE_STATUSES }
         }
       },
@@ -345,8 +426,9 @@ router.get('/top-categories', async (req, res) => {
 router.get('/recent-orders', async (req, res) => {
   try {
     const { limit = 10 } = req.query;
+    const storeFilter = resolveStoreFilter(req);
 
-    const recentOrders = await Order.find()
+    const recentOrders = await Order.find(storeFilter ? { store_code: storeFilter } : {})
       .sort({ order_placed_at: -1 })
       .limit(parseInt(limit))
       .select('order_number mobile_no order_status order_summary.total_amount order_placed_at customer_info');
@@ -370,7 +452,10 @@ router.get('/recent-orders', async (req, res) => {
 // @access  Admin
 router.get('/order-status-distribution', async (req, res) => {
   try {
+    const storeFilter = resolveStoreFilter(req);
+
     const distribution = await Order.aggregate([
+      ...(storeFilter ? [{ $match: { store_code: storeFilter } }] : []),
       {
         $group: {
           _id: '$order_status',
@@ -402,7 +487,10 @@ router.get('/order-status-distribution', async (req, res) => {
 // @access  Admin
 router.get('/payment-status-distribution', async (req, res) => {
   try {
+    const storeFilter = resolveStoreFilter(req);
+
     const distribution = await Order.aggregate([
+      ...(storeFilter ? [{ $match: { store_code: storeFilter } }] : []),
       {
         $group: {
           _id: '$payment_info.payment_status',
@@ -435,22 +523,30 @@ router.get('/payment-status-distribution', async (req, res) => {
 router.get('/user-activity', async (req, res) => {
   try {
     const now = new Date();
+    const storeFilter = resolveStoreFilter(req);
+    const userBase = (await resolveStoreCustomerFilter(storeFilter)) || {};
 
     // Active in last hour
     const oneHourAgo = new Date(now.getTime() - 60 * 60 * 1000);
     const activeLastHour = await User.countDocuments({
+      ...userBase,
+      role: 'user',
       lastActiveAt: { $gte: oneHourAgo }
     });
 
     // Active in last 24 hours
     const oneDayAgo = new Date(now.getTime() - 24 * 60 * 60 * 1000);
     const activeLastDay = await User.countDocuments({
+      ...userBase,
+      role: 'user',
       lastActiveAt: { $gte: oneDayAgo }
     });
 
     // Active in last 7 days
     const sevenDaysAgo = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
     const activeLastWeek = await User.countDocuments({
+      ...userBase,
+      role: 'user',
       lastActiveAt: { $gte: sevenDaysAgo }
     });
 
