@@ -1127,6 +1127,8 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
     // ==== sync_mode: create newly-stocked combos, deactivate dropped ones ====
     let created = 0;
     const createdDetails = [];
+    let createdUnclassified = 0;
+    const createdUnclassifiedDetails = [];
     const unresolvablePcodes = [];
     let deactivated = 0;
     const deactivatedCodes = [];
@@ -1134,9 +1136,18 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
 
     if (syncMode) {
       // --- Create: (p_code, store) combos the file mentions with no
-      // existing document, resolved via a sibling of the same p_code in
-      // ANY other store (not just the ones in this file) for its
-      // department/category/subcategory. ---
+      // existing document. The CSV never carries department/category/
+      // subcategory itself, so classification can only come from a
+      // sibling — the same p_code already sitting in ANY other store (not
+      // just the ones in this file). When no sibling exists anywhere
+      // either (a p_code genuinely new to the whole catalog), the product
+      // is still created — deliberately left unclassified (empty dept/
+      // category/sub_category_id) rather than skipped outright, so it
+      // shows up via the Unclassified-only filter on the Products page
+      // for someone to classify by hand, instead of silently never
+      // existing. unclassifiedOr elsewhere in this route is exactly what
+      // then finds it: an empty string matches none of the tenant's real
+      // department/category/subcategory ids. ---
       const missingRows = dataRows
         .map((row) => ({ row, pcode: row[idx.P_CODE].trim(), targetStore: rowStoreCode(row) }))
         .filter(({ pcode, targetStore }) => targetStore && !existingByKey.has(`${pcode}|${targetStore}`));
@@ -1157,19 +1168,31 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
         const toCreate = new Map();
         for (const { row, pcode, targetStore } of missingRows) {
           const sibling = siblingByPcode.get(pcode);
-          if (!sibling) {
-            unresolvablePcodes.push(pcode);
-            continue;
-          }
 
-          let packageSize = sibling.package_size;
-          let packageUnit = sibling.package_unit;
+          // Package size/unit: from a sibling when one exists, otherwise
+          // parsed straight off this row's own package_size column — the
+          // one piece of this data every row carries regardless of
+          // whether a sibling exists to clone the rest from.
+          let packageSize = sibling ? sibling.package_size : undefined;
+          let packageUnit = sibling ? sibling.package_unit : undefined;
           if (idx.package_size !== undefined && row[idx.package_size]) {
             const m = PACKAGE_SIZE_RE.exec(row[idx.package_size].trim());
             if (m) {
               packageSize = parseFloat(m[1]);
               packageUnit = m[2].toUpperCase();
             }
+          }
+          if (packageSize === undefined || !packageUnit) {
+            unresolvablePcodes.push(pcode);
+            continue;
+          }
+
+          const productName = (idx.product_name !== undefined && row[idx.product_name])
+            ? row[idx.product_name].trim()
+            : (sibling ? sibling.product_name : undefined);
+          if (!productName) {
+            unresolvablePcodes.push(pcode);
+            continue;
           }
 
           const ourPriceRaw = idx.our_price !== undefined && row[idx.our_price] !== '' ? row[idx.our_price].trim() : null;
@@ -1185,31 +1208,44 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
 
           toCreate.set(`${pcode}|${targetStore}`, {
             p_code: pcode,
-            barcode: (idx.BARCODE !== undefined && row[idx.BARCODE]) ? row[idx.BARCODE].trim() : (sibling.barcode || ''),
-            product_name: (idx.product_name !== undefined && row[idx.product_name]) ? row[idx.product_name].trim() : sibling.product_name,
+            barcode: (idx.BARCODE !== undefined && row[idx.BARCODE]) ? row[idx.BARCODE].trim() : (sibling ? sibling.barcode || '' : ''),
+            product_name: productName,
             package_size: packageSize,
             package_unit: packageUnit,
             product_mrp: mongoose.Types.Decimal128.fromString(productMrpRaw),
             our_price: mongoose.Types.Decimal128.fromString(ourPriceRaw),
-            brand_name: (idx.BRAND_NAME !== undefined && row[idx.BRAND_NAME]) ? row[idx.BRAND_NAME].trim() : (sibling.brand_name || ''),
+            brand_name: (idx.BRAND_NAME !== undefined && row[idx.BRAND_NAME]) ? row[idx.BRAND_NAME].trim() : (sibling ? sibling.brand_name || '' : ''),
             store_code: targetStore,
             pcode_status: pcodeStatus,
-            dept_id: sibling.dept_id,
-            category_id: sibling.category_id,
-            sub_category_id: sibling.sub_category_id,
+            // No sibling anywhere to clone a real classification from —
+            // left unclassified rather than fabricated. Empty string
+            // satisfies the schema's required check while matching none
+            // of the tenant's real ids, so unclassified_only picks it up.
+            dept_id: sibling ? sibling.dept_id : '',
+            category_id: sibling ? sibling.category_id : '',
+            sub_category_id: sibling ? sibling.sub_category_id : '',
             store_quantity: quantity,
-            max_quantity_allowed: sibling.max_quantity_allowed || 10,
-            search_keyword: sibling.search_keyword || undefined,
-            project_code: sibling.project_code || req.tenant.projectCode
+            max_quantity_allowed: sibling ? sibling.max_quantity_allowed || 10 : 10,
+            search_keyword: sibling ? sibling.search_keyword || undefined : undefined,
+            project_code: sibling ? sibling.project_code || req.tenant.projectCode : req.tenant.projectCode,
+            _unclassified: !sibling
           });
         }
 
         const docsToCreate = [...toCreate.values()];
         if (docsToCreate.length && !dryRun) {
-          await ProductMasterTenant.insertMany(docsToCreate, { ordered: false });
+          // _unclassified is a marker for this handler only, not a schema
+          // field — stripped before insert.
+          await ProductMasterTenant.insertMany(
+            docsToCreate.map(({ _unclassified, ...doc }) => doc),
+            { ordered: false }
+          );
         }
         created = docsToCreate.length;
         createdDetails.push(...docsToCreate.slice(0, 50).map((d) => `${d.p_code} (${d.store_code})`));
+        const unclassifiedCreated = docsToCreate.filter((d) => d._unclassified);
+        createdUnclassified = unclassifiedCreated.length;
+        createdUnclassifiedDetails.push(...unclassifiedCreated.slice(0, 50).map((d) => `${d.p_code} (${d.store_code})`));
       }
 
       // --- Deactivate: active docs for a store this file mentions, whose
@@ -1254,7 +1290,7 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
     }
 
     const message = syncMode
-      ? `${dryRun ? '[Dry run] ' : ''}Sync: updated ${updated}, created ${created}, deactivated ${deactivated} of ${dataRows.length} row(s)`
+      ? `${dryRun ? '[Dry run] ' : ''}Sync: updated ${updated}, created ${created}${createdUnclassified ? ` (${createdUnclassified} unclassified)` : ''}, deactivated ${deactivated} of ${dataRows.length} row(s)`
       : `Updated ${updated} of ${dataRows.length} product(s) from the CSV`;
 
     res.status(200).json({
@@ -1283,6 +1319,13 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
         dry_run: dryRun,
         created,
         created_details: createdDetails,
+        // Subset of `created` that had no sibling anywhere to clone a real
+        // classification from — created anyway, deliberately unclassified.
+        created_unclassified: createdUnclassified,
+        created_unclassified_details: createdUnclassifiedDetails,
+        // Now only p_codes that couldn't be created at all (no package
+        // size obtainable, no product name, or no price in the row) —
+        // a missing classification alone no longer lands here.
         unresolvable_pcodes: [...new Set(unresolvablePcodes)].slice(0, 50),
         deactivated,
         deactivated_codes: deactivatedCodes,
