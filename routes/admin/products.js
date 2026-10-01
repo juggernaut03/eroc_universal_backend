@@ -942,6 +942,16 @@ function parseCsvBuffer(buffer) {
 
 const PACKAGE_SIZE_RE = /^([0-9.]+)\s*([A-Za-z]+)$/;
 
+// Placeholder dept/category/sub_category_id for a sync-created product with
+// no sibling anywhere to clone real classification from. Can't be '' —
+// Mongoose's required validator rejects an empty string for a String field,
+// which silently drops the whole insertMany document when combined with
+// { ordered: false } (no document, no thrown error either — it was passing
+// validation past nobody's notice). Guaranteed to never collide with a real
+// id, which are numeric strings everywhere in this dataset, so it still
+// falls out of unclassified_only's $nin check exactly like '' would have.
+const UNCLASSIFIED_ID = 'UNCLASSIFIED';
+
 // A form field arrives as the string "true"/"false" (multipart never sends
 // real booleans) — this is also lenient about a bare "1".
 const toBool = (v) => v === true || v === 'true' || v === '1';
@@ -1221,9 +1231,9 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
             // left unclassified rather than fabricated. Empty string
             // satisfies the schema's required check while matching none
             // of the tenant's real ids, so unclassified_only picks it up.
-            dept_id: sibling ? sibling.dept_id : '',
-            category_id: sibling ? sibling.category_id : '',
-            sub_category_id: sibling ? sibling.sub_category_id : '',
+            dept_id: sibling ? sibling.dept_id : UNCLASSIFIED_ID,
+            category_id: sibling ? sibling.category_id : UNCLASSIFIED_ID,
+            sub_category_id: sibling ? sibling.sub_category_id : UNCLASSIFIED_ID,
             store_quantity: quantity,
             max_quantity_allowed: sibling ? sibling.max_quantity_allowed || 10 : 10,
             search_keyword: sibling ? sibling.search_keyword || undefined : undefined,
@@ -1233,17 +1243,38 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
         }
 
         const docsToCreate = [...toCreate.values()];
-        if (docsToCreate.length && !dryRun) {
-          // _unclassified is a marker for this handler only, not a schema
-          // field — stripped before insert.
-          await ProductMasterTenant.insertMany(
-            docsToCreate.map(({ _unclassified, ...doc }) => doc),
-            { ordered: false }
-          );
+        // insertMany's own return value is the only trustworthy record of
+        // what actually landed: with { ordered: false }, a document that
+        // fails schema validation (e.g. '' on a required field — exactly
+        // what dept_id/category_id/sub_category_id used to be set to here)
+        // is silently dropped from the batch with NO thrown error, so
+        // trusting docsToCreate.length as "created" previously reported
+        // success for documents that were never actually written.
+        let actuallyCreated = docsToCreate;
+        if (docsToCreate.length) {
+          if (dryRun) {
+            // No DB round trip in a preview — validate client-side instead,
+            // so a dry run's "would create" count matches what a real run
+            // would actually manage, not just what was attempted.
+            actuallyCreated = docsToCreate.filter(({ _unclassified, ...doc }) => {
+              const err = new ProductMasterTenant(doc).validateSync();
+              return !err;
+            });
+          } else {
+            const inserted = await ProductMasterTenant.insertMany(
+              docsToCreate.map(({ _unclassified, ...doc }) => doc),
+              { ordered: false }
+            );
+            const insertedKeys = new Set(inserted.map((d) => `${d.p_code}|${d.store_code}`));
+            actuallyCreated = docsToCreate.filter((d) => insertedKeys.has(`${d.p_code}|${d.store_code}`));
+          }
         }
-        created = docsToCreate.length;
-        createdDetails.push(...docsToCreate.slice(0, 50).map((d) => `${d.p_code} (${d.store_code})`));
-        const unclassifiedCreated = docsToCreate.filter((d) => d._unclassified);
+        const creationFailed = docsToCreate.filter((d) => !actuallyCreated.includes(d));
+        unresolvablePcodes.push(...creationFailed.map((d) => d.p_code));
+
+        created = actuallyCreated.length;
+        createdDetails.push(...actuallyCreated.slice(0, 50).map((d) => `${d.p_code} (${d.store_code})`));
+        const unclassifiedCreated = actuallyCreated.filter((d) => d._unclassified);
         createdUnclassified = unclassifiedCreated.length;
         createdUnclassifiedDetails.push(...unclassifiedCreated.slice(0, 50).map((d) => `${d.p_code} (${d.store_code})`));
       }
