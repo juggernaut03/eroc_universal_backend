@@ -107,6 +107,13 @@ productMasterSchema.index({ category_id: 1 });
 productMasterSchema.index({ sub_category_id: 1 });
 productMasterSchema.index({ pcode_status: 1 });
 productMasterSchema.index({ store_code: 1, dept_id: 1, category_id: 1, sub_category_id: 1 });
+// One document per (p_code, store_code) is the invariant every count on this
+// collection (active/inactive/total, the bulk-CSV matcher's existingByKey)
+// depends on — nothing enforced that before, so a double-run or a race
+// between two concurrent uploads could silently duplicate a row and inflate
+// every count built on top of it. p_code is a free-typed string, not this
+// schema's own _id, so this is the only thing that actually guarantees it.
+productMasterSchema.index({ p_code: 1, store_code: 1 }, { unique: true });
 productMasterSchema.index({ product_name: 'text', product_description: 'text' });
 
 // Static method to find products by filters
