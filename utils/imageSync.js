@@ -36,12 +36,18 @@ const findPoolFile = (barcode, suffix) => {
   return null;
 };
 
-// Runs a full sync for one tenant: reads {p_code, barcode} straight from
+// Runs a sync for one tenant: reads {p_code, barcode} straight from
 // ProductMaster (the CSV is never re-read here — the database is the source
 // of truth once a catalog is imported), looks each barcode up in the pool,
 // and copies matches into that tenant's public folder as
 // <p_code>_1.webp / <p_code>_2.webp. Manual-only by design — nothing calls
 // this automatically; it's invoked from the admin "sync now" action.
+//
+// Only products still missing pcode_img and/or pcode_img_2 are looked up
+// and copied — a product that already has both is skipped entirely (no pool
+// stat, no file copy, no DB write), so re-running this on an
+// already-largely-synced catalog is cheap instead of redoing every file
+// every time.
 //
 // One document per p_code, one barcode per document — the per-store
 // duplication that used to make barcode drift possible (and force this
@@ -77,25 +83,42 @@ async function syncProject(projectCode, { triggeredBy, triggeredByEmail } = {}) 
 
   for (const product of products) {
     const { p_code: pcode, barcode } = product;
+    const needsPrimary = !product.pcode_img;
+    const needsSecondary = !product.pcode_img_2;
+
+    // Already has both images on file — nothing to look up or copy. This is
+    // what makes "Sync now" cheap on a catalog that's already covered:
+    // without this, every run re-stat'd the pool and re-copied the same
+    // bytes for every already-matched product, every time.
+    if (!needsPrimary && !needsSecondary) {
+      continue;
+    }
+
     const update = {};
+    let primaryPresent = !needsPrimary;
 
-    const primarySrc = findPoolFile(barcode, 1);
-    if (primarySrc) {
-      const dest = path.join(tenantDir, `${pcode}_1.webp`);
-      await fs.promises.copyFile(primarySrc, dest);
-      update.pcode_img = buildImageUrl(projectCode, pcode, 1);
-      matchedPrimary += 1;
+    if (needsPrimary) {
+      const primarySrc = findPoolFile(barcode, 1);
+      if (primarySrc) {
+        const dest = path.join(tenantDir, `${pcode}_1.webp`);
+        await fs.promises.copyFile(primarySrc, dest);
+        update.pcode_img = buildImageUrl(projectCode, pcode, 1);
+        matchedPrimary += 1;
+        primaryPresent = true;
+      }
     }
 
-    const secondarySrc = findPoolFile(barcode, 2);
-    if (secondarySrc) {
-      const dest = path.join(tenantDir, `${pcode}_2.webp`);
-      await fs.promises.copyFile(secondarySrc, dest);
-      update.pcode_img_2 = buildImageUrl(projectCode, pcode, 2);
-      matchedSecondary += 1;
+    if (needsSecondary) {
+      const secondarySrc = findPoolFile(barcode, 2);
+      if (secondarySrc) {
+        const dest = path.join(tenantDir, `${pcode}_2.webp`);
+        await fs.promises.copyFile(secondarySrc, dest);
+        update.pcode_img_2 = buildImageUrl(projectCode, pcode, 2);
+        matchedSecondary += 1;
+      }
     }
 
-    if (!primarySrc) {
+    if (!primaryPresent) {
       missingCount += 1;
       missingSample.push({ p_code: pcode, barcode, product_name: product.product_name });
     }
