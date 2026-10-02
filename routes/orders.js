@@ -212,6 +212,7 @@ router.get('/:orderNumber', protect, async (req, res, next) => {
       success: true,
       order: {
         order_number: order.order_number,
+        store_code: order.store_code,
         order_status: order.order_status,
         fulfillment_type: order.fulfillment_type,
         order_placed_at: order.order_placed_at,
