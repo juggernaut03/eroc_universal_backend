@@ -1008,14 +1008,15 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
     // it directly instead of trusting ALS this far into the request.
     const ProductMasterTenant = getTenantDb(req.tenant.project.db_name).models.ProductMaster;
 
-    // A single global store_code (given in the body) forces every row to
-    // that one store — the common single-store upload, and mandatory for a
-    // store-restricted admin (without it, a p_code match would span every
-    // store in the tenant, letting a store manager's upload touch another
-    // store's catalog). Omitted, and when the file itself carries a
-    // BR_CODE column, each row is matched against its own BR_CODE instead
-    // — despite the name, this tenant's exports use it for the store code,
-    // not a brand code — so one file can refresh several stores at once.
+    // The admin panel always sends whichever store happens to be selected
+    // in its sidebar as store_code — that's ambient UI context (which
+    // store you're currently "looking at"), not an instruction to force a
+    // multi-store file onto one store. A real incident came from exactly
+    // this: a multi-store file uploaded while one store was selected
+    // force-matched EVERY row (including every other store's rows) onto
+    // that single store, repeatedly overwriting it and never correctly
+    // deactivating anything for it either — rowStoreCode below is what
+    // actually decides this now, not this value directly.
     const bodyStoreCode = typeof req.body.store_code === 'string' ? req.body.store_code.trim() : '';
     const syncMode = toBool(req.body.sync_mode);
     const confirmDeactivation = toBool(req.body.confirm_deactivation);
@@ -1047,11 +1048,25 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
 
     const dataRows = rows.slice(1).filter((r) => r.length > 1 && r[idx.P_CODE] && r[idx.P_CODE].trim());
 
-    // The store each row matches against: the explicit body store_code
-    // wins when given; otherwise that row's own BR_CODE. A row with
-    // neither has nothing to match on and is reported, not guessed at.
-    const rowStoreCode = (row) =>
-      bodyStoreCode || (idx.BR_CODE !== undefined ? (row[idx.BR_CODE] || '').trim() : '');
+    // The store each row matches against:
+    //   - a store-restricted admin is pinned to their own (already
+    //     access-checked) store, full stop — the file's BR_CODE can never
+    //     be used to reach past it. Any row for another store just won't
+    //     match anything and comes back skipped, not applied elsewhere.
+    //   - otherwise, the row's own BR_CODE wins whenever the file carries
+    //     one, regardless of which store is selected in the panel's
+    //     sidebar — that selection is just ambient context, not a scope
+    //     for this upload. Falls back to the body store_code only when
+    //     the file has no BR_CODE column at all (a genuine single-store
+    //     export).
+    // A row with neither has nothing to match on and is reported, not
+    // guessed at.
+    const isStoreRestricted = !!(req.user.allowed_store_codes && req.user.allowed_store_codes.length > 0);
+    const rowStoreCode = (row) => {
+      if (isStoreRestricted) return bodyStoreCode;
+      const fileStore = idx.BR_CODE !== undefined ? (row[idx.BR_CODE] || '').trim() : '';
+      return fileStore || bodyStoreCode;
+    };
 
     const pcodes = [...new Set(dataRows.map((r) => r[idx.P_CODE].trim()))];
     const storeCodesInFile = [...new Set(dataRows.map(rowStoreCode).filter(Boolean))];
