@@ -198,24 +198,26 @@ cartSchema.methods.validateItems = async function () {
     .filter((item) => !dealPriceByPCode.has(item.p_code))
     .reduce((sum, item) => sum + item.total_price, 0);
 
-  // Helper function to format product data for frontend
-  const formatProductData = (product) => {
+  // Helper function to format product data for frontend — identity fields
+  // off the product document, price/stock/status off its listing for this
+  // cart item's store.
+  const formatProductData = (product, listing) => {
     return {
       p_code: product.p_code,
       product_name: product.product_name,
       product_description: product.product_description,
       package_size: product.package_size,
       package_unit: product.package_unit,
-      product_mrp: product.product_mrp ? parseFloat(product.product_mrp.toString()) : 0,
-      our_price: product.our_price ? parseFloat(product.our_price.toString()) : 0,
+      product_mrp: listing.product_mrp ? parseFloat(listing.product_mrp.toString()) : 0,
+      our_price: listing.our_price ? parseFloat(listing.our_price.toString()) : 0,
       brand_name: product.brand_name,
-      store_code: product.store_code,
-      pcode_status: product.pcode_status,
+      store_code: listing.store_code,
+      pcode_status: listing.pcode_status,
       dept_id: product.dept_id,
       category_id: product.category_id,
       sub_category_id: product.sub_category_id,
-      store_quantity: product.store_quantity,
-      max_quantity_allowed: product.max_quantity_allowed,
+      store_quantity: listing.store_quantity,
+      max_quantity_allowed: listing.max_quantity_allowed,
       pcode_img: product.pcode_img,
       barcode: product.barcode
     };
@@ -228,11 +230,11 @@ cartSchema.methods.validateItems = async function () {
       // Find current product data
       const currentProduct = await ProductMaster.findOne({
         p_code: cartItem.p_code,
-        store_code: cartItem.store_code,
-        pcode_status: 'Y'
+        stores: { $elemMatch: { store_code: cartItem.store_code, pcode_status: 'Y' } }
       });
+      const currentListing = currentProduct?.stores.find((s) => s.store_code === cartItem.store_code);
 
-      if (!currentProduct) {
+      if (!currentProduct || !currentListing) {
         // Product not found or inactive
         validationResults.valid = false;
         validationResults.invalidItems.push({
@@ -255,10 +257,10 @@ cartSchema.methods.validateItems = async function () {
       }
 
       // Format current product data
-      const currentProductData = formatProductData(currentProduct);
-      let currentPrice = parseFloat(currentProduct.our_price?.toString() || '0');
-      const currentStock = currentProduct.store_quantity || 0;
-      const maxAllowed = currentProduct.max_quantity_allowed || null;
+      const currentProductData = formatProductData(currentProduct, currentListing);
+      let currentPrice = parseFloat(currentListing.our_price?.toString() || '0');
+      const currentStock = currentListing.store_quantity || 0;
+      const maxAllowed = currentListing.max_quantity_allowed || null;
       const requestedQuantity = cartItem.quantity;
 
       // This item's stored price is the deal price of a still-eligible

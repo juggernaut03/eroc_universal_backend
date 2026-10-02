@@ -43,17 +43,13 @@ const findPoolFile = (barcode, suffix) => {
 // <p_code>_1.webp / <p_code>_2.webp. Manual-only by design — nothing calls
 // this automatically; it's invoked from the admin "sync now" action.
 //
-// Matching is grouped by p_code, not done per ProductMaster document.
-// A multi-store tenant carries one document per (p_code, store) — the same
-// real product — and each store's own barcode field is independently
-// typed/exported, so it can independently go wrong: one store's export was
-// found with barcodes Excel had mangled into scientific notation
-// ("8.90E+12"), which silently broke matching for that store alone while
-// the other three, with the correct barcode, matched fine. Grouping first
-// means every store-copy's barcode gets a chance to find the pool file, and
-// whichever one works is then written to ALL of that p_code's documents —
-// so the same product can never end up with a different image (or no
-// image) in one store just because of that one store's own bad data.
+// One document per p_code, one barcode per document — the per-store
+// duplication that used to make barcode drift possible (and force this
+// function to try every store-copy's barcode and group results back
+// together) was resolved once, for good, by the ProductMaster migration
+// (scripts/migrate_productmaster_to_stores_array.js) that merged every
+// product's store-copies into one canonical identity. This is now a
+// straight per-product loop, no grouping needed.
 async function syncProject(projectCode, { triggeredBy, triggeredByEmail } = {}) {
   const startedAt = Date.now();
   const Project = getProjectModel();
@@ -73,50 +69,40 @@ async function syncProject(projectCode, { triggeredBy, triggeredByEmail } = {}) 
   const tenantDir = path.join(CDN_STORE_ROOT, projectCode);
   await ensureDir(tenantDir);
 
-  const byPcode = new Map();
-  for (const product of products) {
-    if (!byPcode.has(product.p_code)) byPcode.set(product.p_code, []);
-    byPcode.get(product.p_code).push(product);
-  }
-
   let matchedPrimary = 0;
   let matchedSecondary = 0;
   let missingCount = 0;
-  // Sample for display: one row per missing p_code, not one per store — a
-  // product missing its image is one missing product, not up to four
-  // identical-looking rows. missingCount above stays store-row-based like
-  // matchedPrimary/total_products so the three stay internally consistent
-  // (matchedPrimary + missingCount === total_products).
   const missingSample = [];
   const bulkOps = [];
 
-  for (const [pcode, docs] of byPcode) {
+  for (const product of products) {
+    const { p_code: pcode, barcode } = product;
     const update = {};
 
-    const primarySrc = docs.map((d) => findPoolFile(d.barcode, 1)).find(Boolean) || null;
+    const primarySrc = findPoolFile(barcode, 1);
     if (primarySrc) {
       const dest = path.join(tenantDir, `${pcode}_1.webp`);
       await fs.promises.copyFile(primarySrc, dest);
       update.pcode_img = buildImageUrl(projectCode, pcode, 1);
-      matchedPrimary += docs.length;
+      matchedPrimary += 1;
     }
 
-    const secondarySrc = docs.map((d) => findPoolFile(d.barcode, 2)).find(Boolean) || null;
+    const secondarySrc = findPoolFile(barcode, 2);
     if (secondarySrc) {
       const dest = path.join(tenantDir, `${pcode}_2.webp`);
       await fs.promises.copyFile(secondarySrc, dest);
       update.pcode_img_2 = buildImageUrl(projectCode, pcode, 2);
-      matchedSecondary += docs.length;
+      matchedSecondary += 1;
     }
 
     if (!primarySrc) {
-      missingCount += docs.length;
-      missingSample.push({ p_code: pcode, barcode: docs[0].barcode, product_name: docs[0].product_name });
+      missingCount += 1;
+      missingSample.push({ p_code: pcode, barcode, product_name: product.product_name });
     }
 
     if (Object.keys(update).length > 0) {
       bulkOps.push({
-        updateMany: { filter: { project_code: projectCode, p_code: pcode }, update: { $set: update } }
+        updateOne: { filter: { _id: product._id }, update: { $set: update } }
       });
     }
   }
@@ -197,11 +183,10 @@ async function copyPoolFileToTenant(poolPath, projectCode, pcode, suffix) {
   const db = getTenantDb(project.db_name);
   const ProductMaster = db.models.ProductMaster;
   const field = suffix === 1 ? 'pcode_img' : 'pcode_img_2';
-  // updateMany, not updateOne — a multi-store tenant has one document per
-  // (p_code, store); a manually-accepted match is for the product, every
-  // store's copy of it, not just whichever one document this filter
-  // happened to find first.
-  await ProductMaster.updateMany({ project_code: projectCode, p_code: pcode }, { $set: { [field]: publicUrl } });
+  // One document per p_code — pcode_img/pcode_img_2 are identity fields
+  // now, so a plain updateOne is correct (no more per-store copies to
+  // reach with updateMany).
+  await ProductMaster.updateOne({ project_code: projectCode, p_code: pcode }, { $set: { [field]: publicUrl } });
 
   return publicUrl;
 }

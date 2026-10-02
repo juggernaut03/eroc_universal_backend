@@ -204,25 +204,28 @@ router.get('/:id', checkPermission('users', 'view'), async (req, res) => {
       ]);
 
     // Enrich favorites with product name/image/price - Favorite only stores
-    // p_code + store_code, not a product ref. p_code is only unique per
-    // store, so match on both.
+    // p_code + store_code, not a product ref. One ProductMaster document
+    // per p_code now (price/stock/status live in its stores[]), so this
+    // fetches by p_code alone and picks out each favorite's own store's
+    // listing afterward.
     let enrichedFavorites = favorites;
     if (favorites.length) {
-      const codePairs = favorites.map((f) => ({ p_code: f.p_code, store_code: f.store_code }));
-      const products = await ProductMaster.find({ $or: codePairs })
-        .select('p_code store_code product_name pcode_img product_mrp our_price')
+      const pcodes = [...new Set(favorites.map((f) => f.p_code))];
+      const products = await ProductMaster.find({ p_code: { $in: pcodes } })
+        .select('p_code product_name pcode_img stores')
         .lean();
-      const productMap = new Map(products.map((p) => [`${p.p_code}::${p.store_code}`, p]));
+      const productMap = new Map(products.map((p) => [p.p_code, p]));
       enrichedFavorites = favorites.map((f) => {
-        const product = productMap.get(`${f.p_code}::${f.store_code}`);
+        const product = productMap.get(f.p_code);
+        const listing = product?.stores.find((s) => s.store_code === f.store_code);
         return {
           ...f,
-          product: product
+          product: product && listing
             ? {
                 name: product.product_name,
                 image: product.pcode_img || null,
-                mrp: product.product_mrp ? parseFloat(product.product_mrp.toString()) : null,
-                sellingPrice: product.our_price ? parseFloat(product.our_price.toString()) : null
+                mrp: listing.product_mrp ? parseFloat(listing.product_mrp.toString()) : null,
+                sellingPrice: listing.our_price ? parseFloat(listing.our_price.toString()) : null
               }
             : null
         };

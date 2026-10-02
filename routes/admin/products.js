@@ -32,12 +32,17 @@ const deletePerm = checkPermission('ecommerce', 'delete');
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // Batched reverse lookup for the by-store product list: which additional
-// subcategories (beyond the primary) is each product cross-mapped to.
-const buildAdditionalSubCategoryIdsMap = async (pCodes = []) => {
+// subcategories (beyond the primary) is each product cross-mapped to, for
+// THIS store specifically — SubcategoryProductMap stays per-(p_code,
+// store_code) by design (a product can be cross-mapped differently per
+// store), so a caller that's already store-scoped must filter by store
+// here too, or a product's additional-subcategory list bleeds in entries
+// that only apply to a different store.
+const buildAdditionalSubCategoryIdsMap = async (pCodes = [], storeCode) => {
   const uniqueCodes = [...new Set(pCodes.filter(Boolean))];
   if (uniqueCodes.length === 0) return {};
 
-  const mappings = await SubcategoryProductMap.find({ p_code: { $in: uniqueCodes } });
+  const mappings = await SubcategoryProductMap.find({ p_code: { $in: uniqueCodes }, store_code: storeCode });
 
   return mappings.reduce((acc, mapping) => {
     const list = acc[mapping.p_code] || (acc[mapping.p_code] = []);
@@ -51,7 +56,11 @@ const buildAdditionalSubCategoryIdsMap = async (pCodes = []) => {
 // called when the caller's request body explicitly names the field (see the
 // `in req.body` guards below) — a request that doesn't mention mappings must
 // never touch them, e.g. a `{ pcode_status }`-only partial update.
-const syncAdditionalSubCategoryMappings = async (product, additionalSubCategoryIds) => {
+// storeCode is explicit, not read off `product` — SubcategoryProductMap
+// stays per-(p_code, store_code), but a ProductMaster document is no
+// longer itself scoped to one store, so there's no `product.store_code` to
+// fall back on.
+const syncAdditionalSubCategoryMappings = async (product, additionalSubCategoryIds, storeCode) => {
   const uniqueIds = [...new Set((additionalSubCategoryIds || []).filter(Boolean))]
     .filter((id) => id !== product.sub_category_id); // mapping to your own primary is a no-op, not an error
 
@@ -67,7 +76,7 @@ const syncAdditionalSubCategoryMappings = async (product, additionalSubCategoryI
     }
   }
 
-  await SubcategoryProductMap.replaceForProduct(product.p_code, product.store_code, uniqueIds);
+  await SubcategoryProductMap.replaceForProduct(product.p_code, storeCode, uniqueIds);
 };
 
 // @route   GET /api/admin/products
@@ -201,16 +210,23 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
       });
     }
 
-    // Build query
-    const query = { store_code: store_code.trim() };
+    const storeCode = store_code.trim();
 
+    // $elemMatch, not two separate 'stores.store_code'/'stores.pcode_status'
+    // conditions — both have to hold on the SAME stores[] entry, or this
+    // would match a doc where any element has this store_code and any
+    // element (possibly a different one) has the right status.
+    const storeElemMatch = { store_code: storeCode };
     if (status === 'active') {
-      query.pcode_status = 'Y';
+      storeElemMatch.pcode_status = 'Y';
     } else if (status === 'inactive') {
-      query.pcode_status = 'N';
+      storeElemMatch.pcode_status = 'N';
     }
     // status === 'all' (or anything else unrecognized): no pcode_status
     // filter at all.
+
+    // Build query
+    const query = { stores: { $elemMatch: storeElemMatch } };
 
     // Add search filter — across product name, p_code, barcode, and brand.
     // This previously matched product_name only, despite the panel's own
@@ -272,9 +288,34 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
     }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    let products;
-    let total;
 
+    // A plain find() can no longer flatten a matched stores[] entry onto
+    // the top level by itself, so both the search and non-search paths now
+    // go through one aggregation: $match, then pull this store's own
+    // listing out of stores[] into `_store` for the response/sort to read.
+    const basePipeline = [
+      { $match: query },
+      {
+        $addFields: {
+          _store: {
+            $first: {
+              $filter: {
+                input: '$stores',
+                cond: { $eq: ['$$this.store_code', storeCode] }
+              }
+            }
+          }
+        }
+      }
+    ];
+
+    // sortBy can name either an identity field (product_name, p_code — top
+    // level, unchanged) or a per-store field (our_price, store_quantity,
+    // pcode_status — now under _store).
+    const PER_STORE_SORT_FIELDS = new Set(['our_price', 'product_mrp', 'store_quantity', 'pcode_status', 'max_quantity_allowed']);
+    const sortField = PER_STORE_SORT_FIELDS.has(sortBy) ? `_store.${sortBy}` : sortBy;
+
+    let pipeline;
     if (searchTerm) {
       // A plain product_name sort buries an exact p_code/barcode hit
       // alphabetically among dozens of unrelated substring matches (e.g.
@@ -285,8 +326,8 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
       // with product_name as the tiebreaker within each rank.
       const escaped = escapeRegex(searchTerm);
       const prefixRe = new RegExp(`^${escaped}`, 'i');
-      const pipeline = [
-        { $match: query },
+      pipeline = [
+        ...basePipeline,
         {
           $addFields: {
             _searchRank: {
@@ -306,25 +347,25 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
         { $skip: skip },
         { $limit: parseInt(limit) }
       ];
-      products = await ProductMaster.aggregate(pipeline);
-      total = await ProductMaster.countDocuments(query);
     } else {
-      const sort = {};
-      sort[sortBy] = sortOrder === 'asc' ? 1 : -1;
-
-      products = await ProductMaster.find(query)
-        .sort(sort)
-        .limit(parseInt(limit))
-        .skip(skip);
-
-      total = await ProductMaster.countDocuments(query);
+      pipeline = [
+        ...basePipeline,
+        { $sort: { [sortField]: sortOrder === 'asc' ? 1 : -1 } },
+        { $skip: skip },
+        { $limit: parseInt(limit) }
+      ];
     }
 
+    const products = await ProductMaster.aggregate(pipeline);
+    const total = await ProductMaster.countDocuments(query);
+
     const additionalSubCategoryIdsMap = await buildAdditionalSubCategoryIdsMap(
-      products.map(product => product.p_code)
+      products.map(product => product.p_code),
+      storeCode
     );
 
-    // Format response data
+    // Format response data — identity fields off the document root, price/
+    // stock/status off the flattened _store entry.
     const productsData = products.map(product => ({
       id: product._id,
       p_code: product.p_code,
@@ -333,17 +374,17 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
       product_description: product.product_description,
       package_size: product.package_size,
       package_unit: product.package_unit,
-      product_mrp: product.product_mrp ? parseFloat(product.product_mrp.toString()) : 0,
-      our_price: product.our_price ? parseFloat(product.our_price.toString()) : 0,
+      product_mrp: product._store?.product_mrp ? parseFloat(product._store.product_mrp.toString()) : 0,
+      our_price: product._store?.our_price ? parseFloat(product._store.our_price.toString()) : 0,
       brand_name: product.brand_name,
-      store_code: product.store_code,
-      pcode_status: product.pcode_status,
+      store_code: storeCode,
+      pcode_status: product._store?.pcode_status,
       dept_id: product.dept_id,
       category_id: product.category_id,
       sub_category_id: product.sub_category_id,
       additional_sub_category_ids: additionalSubCategoryIdsMap[product.p_code] || [],
-      store_quantity: product.store_quantity,
-      max_quantity_allowed: product.max_quantity_allowed,
+      store_quantity: product._store?.store_quantity,
+      max_quantity_allowed: product._store?.max_quantity_allowed,
       pcode_img: product.pcode_img
     }));
 
@@ -354,23 +395,20 @@ router.post('/by-store', viewPerm, requireStoreAccess, async (req, res) => {
     // computed; inactive_count/unclassified_active_count are mutually
     // exclusive with each other, matching whichever side of the
     // Unclassified-only toggle the request is on.
-    const totalProducts = await ProductMaster.countDocuments({ store_code: store_code.trim() });
+    const totalProducts = await ProductMaster.countDocuments({ 'stores.store_code': storeCode });
     const activeCount = await ProductMaster.countDocuments({
-      store_code: store_code.trim(),
-      pcode_status: 'Y'
+      stores: { $elemMatch: { store_code: storeCode, pcode_status: 'Y' } }
     });
     let inactiveCount = null;
     let unclassifiedActiveCount = null;
     if (unclassified_only && unclassifiedOr) {
       unclassifiedActiveCount = await ProductMaster.countDocuments({
-        store_code: store_code.trim(),
-        pcode_status: 'Y',
+        stores: { $elemMatch: { store_code: storeCode, pcode_status: 'Y' } },
         $or: unclassifiedOr
       });
     } else {
       inactiveCount = await ProductMaster.countDocuments({
-        store_code: store_code.trim(),
-        pcode_status: 'N'
+        stores: { $elemMatch: { store_code: storeCode, pcode_status: 'N' } }
       });
     }
 
@@ -797,19 +835,75 @@ router.post('/bulk-update-status', editPerm, async (req, res) => {
 // ==================== PRODUCT MASTER CRUD ====================
 
 // @route   POST /api/admin/products/master
-// @desc    Create new ProductMaster entry
+// @desc    Create a new product, OR — when p_code already exists for this
+//          tenant — add a new store listing to it. Two real actions
+//          sharing one endpoint, distinguished by whether p_code is
+//          already known: identity fields (name/barcode/category/image)
+//          only ever apply on the create path; adding to another store
+//          never touches them, since they already belong to the existing
+//          document and affect every store at once.
 // @access  Admin (ecommerce:create)
 router.post('/master', createPerm, requireStoreAccess, enforceProductLimit(), async (req, res) => {
   try {
-    const product = await ProductMaster.create(req.body);
+    const {
+      p_code, store_code,
+      our_price, product_mrp, store_quantity, pcode_status, max_quantity_allowed,
+      additional_sub_category_ids,
+      ...identityFields
+    } = req.body;
 
-    if ('additional_sub_category_ids' in req.body) {
-      await syncAdditionalSubCategoryMappings(product, req.body.additional_sub_category_ids);
+    if (!p_code || !store_code) {
+      return res.status(400).json({
+        success: false,
+        message: 'p_code and store_code are required'
+      });
     }
 
-    res.status(201).json({
+    const storeListing = { store_code, our_price, product_mrp, store_quantity, pcode_status, max_quantity_allowed };
+
+    const existing = await ProductMaster.findOne({ p_code });
+    let product;
+    let statusCode = 201;
+
+    if (existing) {
+      if (existing.storeListing(store_code)) {
+        return res.status(400).json({
+          success: false,
+          message: `${p_code} is already listed at store ${store_code}`
+        });
+      }
+      // Conditional on the push itself ($ne), not just the read above —
+      // nothing in Mongo stops two concurrent requests from both passing
+      // the existing.storeListing() check and both pushing; this makes
+      // the actual write race-safe instead of just the read.
+      product = await ProductMaster.findOneAndUpdate(
+        { p_code, 'stores.store_code': { $ne: store_code } },
+        { $push: { stores: storeListing } },
+        { new: true, runValidators: true }
+      );
+      if (!product) {
+        return res.status(409).json({
+          success: false,
+          message: `${p_code} is already listed at store ${store_code} (added by another request just now)`
+        });
+      }
+      statusCode = 200;
+    } else {
+      product = await ProductMaster.create({
+        ...identityFields,
+        p_code,
+        project_code: req.tenant.projectCode,
+        stores: [storeListing]
+      });
+    }
+
+    if ('additional_sub_category_ids' in req.body) {
+      await syncAdditionalSubCategoryMappings(product, additional_sub_category_ids, store_code);
+    }
+
+    res.status(statusCode).json({
       success: true,
-      message: 'Product created successfully',
+      message: existing ? 'Store listing added' : 'Product created successfully',
       data: product
     });
   } catch (error) {
@@ -831,46 +925,107 @@ router.post('/master', createPerm, requireStoreAccess, enforceProductLimit(), as
 });
 
 // @route   PUT /api/admin/products/master/:id
-// @desc    Update ProductMaster entry
+// @desc    Edit this product. Two shapes in one request, kept separate
+//          internally: a `store_code` + any of
+//          our_price/product_mrp/store_quantity/pcode_status/
+//          max_quantity_allowed edits ONE store's listing via an
+//          arrayFilters update; everything else in the body (name/barcode/
+//          category/image/etc.) is an identity edit applied once, which
+//          affects every store this product is listed at — a
+//          store-restricted admin is blocked from that unless they can
+//          access every store the product is listed at (see below), since
+//          it isn't really "their store's" change to make alone.
 // @access  Admin (ecommerce:edit)
 router.put('/master/:id', editPerm, async (req, res) => {
   try {
-    // store_code is only known once the record is loaded, unlike
-    // /by-store or /master (create) where it's already in the request —
-    // so the access check happens here instead of via requireStoreAccess.
-    // 404 rather than 403: a store-restricted admin shouldn't learn a
-    // product in another store even exists.
-    const existing = await ProductMaster.findById(req.params.id).select('store_code');
-    if (!existing || !req.user.canAccessStore(existing.store_code)) {
+    const existing = await ProductMaster.findById(req.params.id);
+    if (!existing) {
       return res.status(404).json({
         success: false,
         message: 'Product not found'
       });
     }
-    // Also block moving the product to a store this admin can't reach.
-    if (req.body.store_code && !req.user.canAccessStore(req.body.store_code)) {
-      return res.status(403).json({
-        success: false,
-        message: `You do not have access to store ${req.body.store_code}`
-      });
-    }
 
-    const product = await ProductMaster.findByIdAndUpdate(
-      req.params.id,
-      req.body,
-      { new: true, runValidators: true }
-    );
+    const {
+      store_code,
+      our_price, product_mrp, store_quantity, pcode_status, max_quantity_allowed,
+      additional_sub_category_ids,
+      ...identityFields
+    } = req.body;
 
-    if (!product) {
+    const listedStoreCodes = existing.stores.map((s) => s.store_code);
+    // 404, not 403, for a store this admin can't reach at all — a
+    // store-restricted admin shouldn't learn a product is listed
+    // somewhere else even exists. Only applies when the product is listed
+    // at a store outside their access; a product entirely within their
+    // reach never trips this.
+    if (!listedStoreCodes.every((s) => req.user.canAccessStore(s)) && !req.user.canAccessStore(store_code || listedStoreCodes[0])) {
       return res.status(404).json({
         success: false,
         message: 'Product not found'
       });
     }
+
+    const hasStoreEdit = [our_price, product_mrp, store_quantity, pcode_status, max_quantity_allowed]
+      .some((v) => v !== undefined);
+    const hasIdentityEdit = Object.keys(identityFields).length > 0;
+
+    if (hasStoreEdit) {
+      if (!store_code) {
+        return res.status(400).json({
+          success: false,
+          message: 'store_code is required to edit price/stock/status'
+        });
+      }
+      if (!req.user.canAccessStore(store_code)) {
+        return res.status(403).json({
+          success: false,
+          message: `You do not have access to store ${store_code}`
+        });
+      }
+      if (!existing.storeListing(store_code)) {
+        return res.status(404).json({
+          success: false,
+          message: `${existing.p_code} is not listed at store ${store_code}`
+        });
+      }
+
+      const storeSet = {};
+      if (our_price !== undefined) storeSet['stores.$[elem].our_price'] = our_price;
+      if (product_mrp !== undefined) storeSet['stores.$[elem].product_mrp'] = product_mrp;
+      if (store_quantity !== undefined) storeSet['stores.$[elem].store_quantity'] = store_quantity;
+      if (pcode_status !== undefined) storeSet['stores.$[elem].pcode_status'] = pcode_status;
+      if (max_quantity_allowed !== undefined) storeSet['stores.$[elem].max_quantity_allowed'] = max_quantity_allowed;
+
+      await ProductMaster.updateOne(
+        { _id: req.params.id },
+        { $set: storeSet },
+        { arrayFilters: [{ 'elem.store_code': store_code }], runValidators: true }
+      );
+    }
+
+    if (hasIdentityEdit) {
+      // Editing identity affects every store at once — a store-restricted
+      // admin needs access to all of them, not just one, or this is
+      // silently changing something for a store they can't even see.
+      if (!listedStoreCodes.every((s) => req.user.canAccessStore(s))) {
+        return res.status(403).json({
+          success: false,
+          message: 'Editing name/category/image affects every store this product is listed at — you do not have access to all of them'
+        });
+      }
+      await ProductMaster.updateOne(
+        { _id: req.params.id },
+        { $set: identityFields },
+        { runValidators: true }
+      );
+    }
+
+    const product = await ProductMaster.findById(req.params.id);
 
     // Guarded by presence, not truthiness — see syncAdditionalSubCategoryMappings.
     if ('additional_sub_category_ids' in req.body) {
-      await syncAdditionalSubCategoryMappings(product, req.body.additional_sub_category_ids);
+      await syncAdditionalSubCategoryMappings(product, additional_sub_category_ids, store_code || listedStoreCodes[0]);
     }
 
     res.status(200).json({
@@ -889,30 +1044,63 @@ router.put('/master/:id', editPerm, async (req, res) => {
 });
 
 // @route   DELETE /api/admin/products/master/:id
-// @desc    Delete ProductMaster entry
+// @desc    Remove this product from one store (store_code in the body —
+//          $pull one stores[] entry), or delete the whole document when
+//          no store_code is given AND the admin can access every store
+//          it's listed at. A store-restricted admin's delete always means
+//          "remove my store's listing," never the whole product — even if
+//          they happen to be the only store it's listed at, since that's
+//          still a $pull down to an empty stores[], not a document delete,
+//          for consistency with what "their delete button" always does.
 // @access  Admin (ecommerce:delete)
 router.delete('/master/:id', deletePerm, async (req, res) => {
   try {
-    const existing = await ProductMaster.findById(req.params.id).select('store_code');
-    if (!existing || !req.user.canAccessStore(existing.store_code)) {
+    const existing = await ProductMaster.findById(req.params.id);
+    if (!existing) {
       return res.status(404).json({
         success: false,
         message: 'Product not found'
       });
     }
 
-    const product = await ProductMaster.findByIdAndDelete(req.params.id);
+    const listedStoreCodes = existing.stores.map((s) => s.store_code);
+    const isStoreRestricted = !!(req.user.allowed_store_codes && req.user.allowed_store_codes.length > 0);
+    const store_code = req.body.store_code || (isStoreRestricted ? req.user.allowed_store_codes.find((s) => listedStoreCodes.includes(s)) : undefined);
 
-    if (!product) {
+    if (store_code && !listedStoreCodes.includes(store_code)) {
+      return res.status(404).json({
+        success: false,
+        message: `${existing.p_code} is not listed at store ${store_code}`
+      });
+    }
+    if (store_code && !req.user.canAccessStore(store_code)) {
+      return res.status(403).json({
+        success: false,
+        message: `You do not have access to store ${store_code}`
+      });
+    }
+    if (!store_code && !listedStoreCodes.every((s) => req.user.canAccessStore(s))) {
+      // Whole-document delete requested (or forced, for a store-restricted
+      // admin with no accessible listing on this product) but this admin
+      // can't reach every store it's listed at — 404, not 403, same reasoning
+      // as PUT above.
       return res.status(404).json({
         success: false,
         message: 'Product not found'
       });
+    }
+
+    if (store_code) {
+      await ProductMaster.updateOne({ _id: req.params.id }, { $pull: { stores: { store_code } } });
+      await SubcategoryProductMap.deleteMany({ p_code: existing.p_code, store_code });
+    } else {
+      await ProductMaster.findByIdAndDelete(req.params.id);
+      await SubcategoryProductMap.deleteMany({ p_code: existing.p_code });
     }
 
     res.status(200).json({
       success: true,
-      message: 'Product deleted successfully'
+      message: store_code ? `Removed from store ${store_code}` : 'Product deleted successfully'
     });
   } catch (error) {
     console.error('Delete ProductMaster error:', error);
@@ -1071,82 +1259,97 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
     const pcodes = [...new Set(dataRows.map((r) => r[idx.P_CODE].trim()))];
     const storeCodesInFile = [...new Set(dataRows.map(rowStoreCode).filter(Boolean))];
 
-    const matchQuery = { p_code: { $in: pcodes } };
-    if (storeCodesInFile.length) matchQuery.store_code = { $in: storeCodesInFile };
-
-    const existing = await ProductMasterTenant.find(matchQuery)
-      .select('p_code store_code our_price pcode_status');
-    // Keyed by p_code+store_code, not p_code alone — a multi-store file
-    // (BR_CODE varying per row) legitimately repeats the same p_code once
-    // per store, and each occurrence is a different real document.
-    const existingByKey = new Map(existing.map((p) => [`${p.p_code}|${p.store_code}`, p]));
+    // Fetched by p_code alone now — one document per product, carrying
+    // every store's listing in stores[]. Per-row lookups below pull the
+    // specific store's listing out of it.
+    const existing = await ProductMasterTenant.find({ p_code: { $in: pcodes } });
+    const existingByPcode = new Map(existing.map((p) => [p.p_code, p]));
 
     let updated = 0;
     let priceChanged = 0;
     let statusChanged = 0;
     const skippedNotFound = [];
     const packageSizeSkipped = [];
+    const updateOps = [];
 
     for (const row of dataRows) {
       const pcode = row[idx.P_CODE].trim();
       const targetStore = rowStoreCode(row);
-      const current = targetStore ? existingByKey.get(`${pcode}|${targetStore}`) : undefined;
-      if (!current) {
+      const current = targetStore ? existingByPcode.get(pcode) : undefined;
+      const currentListing = current?.storeListing(targetStore);
+      if (!current || !currentListing) {
         skippedNotFound.push(targetStore ? `${pcode} (${targetStore})` : pcode);
         continue;
       }
 
-      // Every field is independent — a malformed package_size on one row
-      // must not block that same row's price/stock/status update, so a
-      // parse failure just skips setting package_size/package_unit, not
-      // the whole row.
-      const set = {};
+      // Identity fields (affect every store this product is listed at) and
+      // per-store fields (this one row's store only) are two different
+      // kinds of update against the same document — a flat $set can't mix
+      // a top-level field with an arrayFilters-targeted one in a way that's
+      // obviously correct, so they're built and applied separately.
+      const identitySet = {};
+      const storeSet = {};
 
-      if (idx.BARCODE !== undefined && row[idx.BARCODE]) set.barcode = row[idx.BARCODE].trim();
-      if (idx.product_name !== undefined && row[idx.product_name]) set.product_name = row[idx.product_name].trim();
-      if (idx.BRAND_NAME !== undefined && row[idx.BRAND_NAME]) set.brand_name = row[idx.BRAND_NAME].trim();
-      // BR_CODE/store_code is used above only to pick which store's record
+      if (idx.BARCODE !== undefined && row[idx.BARCODE]) identitySet.barcode = row[idx.BARCODE].trim();
+      if (idx.product_name !== undefined && row[idx.product_name]) identitySet.product_name = row[idx.product_name].trim();
+      if (idx.BRAND_NAME !== undefined && row[idx.BRAND_NAME]) identitySet.brand_name = row[idx.BRAND_NAME].trim();
+      // BR_CODE/store_code is used above only to pick which store's listing
       // this row updates — never written back; reassigning a product to a
       // different store is a classification change, out of scope here.
 
+      // A malformed package_size on one row must not block that same row's
+      // price/stock/status update, so a parse failure just skips setting
+      // package_size/package_unit, not the whole row.
       if (idx.package_size !== undefined && row[idx.package_size]) {
         const m = PACKAGE_SIZE_RE.exec(row[idx.package_size].trim());
         if (m) {
-          set.package_size = parseFloat(m[1]);
-          set.package_unit = m[2].toUpperCase();
+          identitySet.package_size = parseFloat(m[1]);
+          identitySet.package_unit = m[2].toUpperCase();
         } else {
           packageSizeSkipped.push({ p_code: pcode, package_size: row[idx.package_size].trim() });
         }
       }
 
+      let newPrice;
+      let newStatus;
       if (idx.our_price !== undefined && row[idx.our_price] !== '' && row[idx.our_price] !== undefined) {
-        set.our_price = row[idx.our_price].trim();
+        newPrice = row[idx.our_price].trim();
+        storeSet['stores.$[elem].our_price'] = newPrice;
       }
       if (idx.product_mrp !== undefined && row[idx.product_mrp] !== '' && row[idx.product_mrp] !== undefined) {
-        set.product_mrp = row[idx.product_mrp].trim();
+        storeSet['stores.$[elem].product_mrp'] = row[idx.product_mrp].trim();
       }
       if (idx.quantity !== undefined && row[idx.quantity] !== '' && row[idx.quantity] !== undefined) {
-        set.store_quantity = Number(row[idx.quantity]) || 0;
+        storeSet['stores.$[elem].store_quantity'] = Number(row[idx.quantity]) || 0;
       }
       if (idx.store_code_status !== undefined && row[idx.store_code_status]) {
-        set.pcode_status = row[idx.store_code_status].trim().toUpperCase() === 'N' ? 'N' : 'Y';
+        newStatus = row[idx.store_code_status].trim().toUpperCase() === 'N' ? 'N' : 'Y';
+        storeSet['stores.$[elem].pcode_status'] = newStatus;
       }
 
-      if (Object.keys(set).length === 0) continue;
+      const hasIdentityChange = Object.keys(identitySet).length > 0;
+      const hasStoreChange = Object.keys(storeSet).length > 0;
+      if (!hasIdentityChange && !hasStoreChange) continue;
 
       if (!dryRun) {
-        await ProductMasterTenant.updateOne({ _id: current._id }, { $set: set });
+        const update = { $set: { ...identitySet, ...storeSet } };
+        const options = hasStoreChange ? { arrayFilters: [{ 'elem.store_code': targetStore }] } : {};
+        updateOps.push({ updateOne: { filter: { _id: current._id }, update, ...options } });
       }
       updated++;
 
-      if (set.our_price !== undefined) {
-        const before = parseFloat(current.our_price ? current.our_price.toString() : '0');
-        const after = parseFloat(set.our_price);
+      if (newPrice !== undefined) {
+        const before = parseFloat(currentListing.our_price ? currentListing.our_price.toString() : '0');
+        const after = parseFloat(newPrice);
         if (!Number.isNaN(after) && Math.abs(before - after) > 0.01) priceChanged++;
       }
-      if (set.pcode_status !== undefined && set.pcode_status !== current.pcode_status) {
+      if (newStatus !== undefined && newStatus !== currentListing.pcode_status) {
         statusChanged++;
       }
+    }
+
+    if (!dryRun && updateOps.length) {
+      await ProductMasterTenant.bulkWrite(updateOps, { ordered: false });
     }
 
     // ==== sync_mode: create newly-stocked combos, deactivate dropped ones ====
@@ -1161,137 +1364,189 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
 
     if (syncMode) {
       // --- Create: (p_code, store) combos the file mentions with no
-      // existing document. The CSV never carries department/category/
-      // subcategory itself, so classification can only come from a
-      // sibling — the same p_code already sitting in ANY other store (not
-      // just the ones in this file). When no sibling exists anywhere
-      // either (a p_code genuinely new to the whole catalog), the product
-      // is still created — deliberately left unclassified (empty dept/
-      // category/sub_category_id) rather than skipped outright, so it
-      // shows up via the Unclassified-only filter on the Products page
-      // for someone to classify by hand, instead of silently never
-      // existing. unclassifiedOr elsewhere in this route is exactly what
-      // then finds it: an empty string matches none of the tenant's real
-      // department/category/subcategory ids. ---
+      // existing listing. There are two real cases now, and the old
+      // "clone from a sibling in another store" mechanism this used to
+      // need is GONE for one of them: once there's one document per
+      // product, a p_code already known to this tenant already has its
+      // identity fields (name/barcode/package/category) sitting right on
+      // the document — a missing store for it is just a new stores[]
+      // entry, nothing to clone. Only a p_code genuinely new to the whole
+      // tenant (no document at all) needs identity fields built from the
+      // row, and even then there's nowhere to classify it — left
+      // unclassified (UNCLASSIFIED_ID) rather than fabricated, so it shows
+      // up via the Unclassified-only filter for someone to classify by
+      // hand instead of silently never existing. ---
       const missingRows = dataRows
         .map((row) => ({ row, pcode: row[idx.P_CODE].trim(), targetStore: rowStoreCode(row) }))
-        .filter(({ pcode, targetStore }) => targetStore && !existingByKey.has(`${pcode}|${targetStore}`));
+        .filter(({ pcode, targetStore }) => {
+          if (!targetStore) return false;
+          const current = existingByPcode.get(pcode);
+          return !current || !current.storeListing(targetStore);
+        });
 
       if (missingRows.length) {
-        const missingPcodes = [...new Set(missingRows.map((m) => m.pcode))];
-        const siblings = await ProductMasterTenant.find({ p_code: { $in: missingPcodes } })
-          .select('p_code dept_id category_id sub_category_id package_size package_unit brand_name product_name barcode max_quantity_allowed search_keyword project_code')
-          .lean();
-        const siblingByPcode = new Map();
-        for (const doc of siblings) {
-          if (!siblingByPcode.has(doc.p_code)) siblingByPcode.set(doc.p_code, doc);
+        // Grouped by p_code so a brand-new product introduced to several
+        // stores in the same file becomes ONE new document carrying every
+        // target store's listing, not several inserts racing on the same
+        // p_code — and so a known p_code missing from two stores becomes
+        // one $push of both listings, not two separate updates.
+        const missingByPcode = new Map();
+        for (const m of missingRows) {
+          if (!missingByPcode.has(m.pcode)) missingByPcode.set(m.pcode, new Map());
+          // Same (pcode, store) appearing twice in the file — last row wins.
+          missingByPcode.get(m.pcode).set(m.targetStore, m.row);
         }
 
-        // The same (p_code, store) can appear more than once if the source
-        // file has duplicate rows — collapse to the last occurrence rather
-        // than creating (or trying to) the same combo twice.
-        const toCreate = new Map();
-        for (const { row, pcode, targetStore } of missingRows) {
-          const sibling = siblingByPcode.get(pcode);
-
-          // Package size/unit: from a sibling when one exists, otherwise
-          // parsed straight off this row's own package_size column — the
-          // one piece of this data every row carries regardless of
-          // whether a sibling exists to clone the rest from.
-          let packageSize = sibling ? sibling.package_size : undefined;
-          let packageUnit = sibling ? sibling.package_unit : undefined;
-          if (idx.package_size !== undefined && row[idx.package_size]) {
-            const m = PACKAGE_SIZE_RE.exec(row[idx.package_size].trim());
-            if (m) {
-              packageSize = parseFloat(m[1]);
-              packageUnit = m[2].toUpperCase();
-            }
-          }
-          if (packageSize === undefined || !packageUnit) {
-            unresolvablePcodes.push(pcode);
-            continue;
-          }
-
-          const productName = (idx.product_name !== undefined && row[idx.product_name])
-            ? row[idx.product_name].trim()
-            : (sibling ? sibling.product_name : undefined);
-          if (!productName) {
-            unresolvablePcodes.push(pcode);
-            continue;
-          }
-
+        // Builds one store-listing subdocument from a row, or null (and
+        // records why) if the row can't supply the required price fields —
+        // the one thing that can never be inferred from anywhere else.
+        const buildListing = (pcode, targetStore, row) => {
           const ourPriceRaw = idx.our_price !== undefined && row[idx.our_price] !== '' ? row[idx.our_price].trim() : null;
           const productMrpRaw = idx.product_mrp !== undefined && row[idx.product_mrp] !== '' ? row[idx.product_mrp].trim() : null;
           if (!ourPriceRaw || !productMrpRaw) {
             unresolvablePcodes.push(pcode);
-            continue;
+            return null;
           }
-
           const quantity = idx.quantity !== undefined && row[idx.quantity] !== '' ? Number(row[idx.quantity]) || 0 : 0;
           const statusRaw = idx.store_code_status !== undefined ? row[idx.store_code_status] : '';
           const pcodeStatus = statusRaw && statusRaw.trim().toUpperCase() === 'N' ? 'N' : 'Y';
+          return {
+            store_code: targetStore,
+            our_price: mongoose.Types.Decimal128.fromString(ourPriceRaw),
+            product_mrp: mongoose.Types.Decimal128.fromString(productMrpRaw),
+            store_quantity: quantity,
+            max_quantity_allowed: 10,
+            pcode_status: pcodeStatus
+          };
+        };
 
-          toCreate.set(`${pcode}|${targetStore}`, {
+        const newDocs = [];
+        const pushOps = [];
+
+        for (const [pcode, rowsByStore] of missingByPcode) {
+          const current = existingByPcode.get(pcode);
+
+          if (current) {
+            // Known p_code — just missing one or more stores. No sibling
+            // lookup, no identity fields to resolve: they're already on
+            // this document.
+            const listings = [...rowsByStore.entries()]
+              .map(([targetStore, row]) => buildListing(pcode, targetStore, row))
+              .filter(Boolean);
+            if (listings.length) {
+              pushOps.push({
+                updateOne: {
+                  // Conditional on the push, not just on having read
+                  // `current` above — a concurrent request pushing the
+                  // same store between then and now would otherwise
+                  // produce two stores[] entries for one store_code.
+                  filter: { _id: current._id, 'stores.store_code': { $nin: listings.map((l) => l.store_code) } },
+                  update: { $push: { stores: { $each: listings } } }
+                },
+                pcode,
+                storeCodes: listings.map((l) => l.store_code)
+              });
+            }
+            continue;
+          }
+
+          // Genuinely new to the tenant — identity has to come from the
+          // row itself; the first row for this p_code supplies it, every
+          // target store becomes one stores[] entry on this one new doc.
+          const firstRow = rowsByStore.values().next().value;
+          let packageSize;
+          let packageUnit;
+          if (idx.package_size !== undefined && firstRow[idx.package_size]) {
+            const m = PACKAGE_SIZE_RE.exec(firstRow[idx.package_size].trim());
+            if (m) { packageSize = parseFloat(m[1]); packageUnit = m[2].toUpperCase(); }
+          }
+          const productName = idx.product_name !== undefined ? (firstRow[idx.product_name] || '').trim() : '';
+          if (packageSize === undefined || !packageUnit || !productName) {
+            unresolvablePcodes.push(pcode);
+            continue;
+          }
+
+          const stores = [...rowsByStore.entries()]
+            .map(([targetStore, row]) => buildListing(pcode, targetStore, row))
+            .filter(Boolean);
+          if (stores.length === 0) continue; // every target store's price was unresolvable
+
+          newDocs.push({
             p_code: pcode,
-            barcode: (idx.BARCODE !== undefined && row[idx.BARCODE]) ? row[idx.BARCODE].trim() : (sibling ? sibling.barcode || '' : ''),
+            barcode: (idx.BARCODE !== undefined && firstRow[idx.BARCODE]) ? firstRow[idx.BARCODE].trim() : '',
             product_name: productName,
             package_size: packageSize,
             package_unit: packageUnit,
-            product_mrp: mongoose.Types.Decimal128.fromString(productMrpRaw),
-            our_price: mongoose.Types.Decimal128.fromString(ourPriceRaw),
-            brand_name: (idx.BRAND_NAME !== undefined && row[idx.BRAND_NAME]) ? row[idx.BRAND_NAME].trim() : (sibling ? sibling.brand_name || '' : ''),
-            store_code: targetStore,
-            pcode_status: pcodeStatus,
-            // No sibling anywhere to clone a real classification from —
-            // left unclassified rather than fabricated. Empty string
-            // satisfies the schema's required check while matching none
-            // of the tenant's real ids, so unclassified_only picks it up.
-            dept_id: sibling ? sibling.dept_id : UNCLASSIFIED_ID,
-            category_id: sibling ? sibling.category_id : UNCLASSIFIED_ID,
-            sub_category_id: sibling ? sibling.sub_category_id : UNCLASSIFIED_ID,
-            store_quantity: quantity,
-            max_quantity_allowed: sibling ? sibling.max_quantity_allowed || 10 : 10,
-            search_keyword: sibling ? sibling.search_keyword || undefined : undefined,
-            project_code: sibling ? sibling.project_code || req.tenant.projectCode : req.tenant.projectCode,
-            _unclassified: !sibling
+            brand_name: (idx.BRAND_NAME !== undefined && firstRow[idx.BRAND_NAME]) ? firstRow[idx.BRAND_NAME].trim() : '',
+            dept_id: UNCLASSIFIED_ID,
+            category_id: UNCLASSIFIED_ID,
+            sub_category_id: UNCLASSIFIED_ID,
+            project_code: req.tenant.projectCode,
+            stores,
+            _unclassified: true
           });
         }
 
-        const docsToCreate = [...toCreate.values()];
         // insertMany's own return value is the only trustworthy record of
         // what actually landed: with { ordered: false }, a document that
-        // fails schema validation (e.g. '' on a required field — exactly
-        // what dept_id/category_id/sub_category_id used to be set to here)
-        // is silently dropped from the batch with NO thrown error, so
-        // trusting docsToCreate.length as "created" previously reported
-        // success for documents that were never actually written.
-        let actuallyCreated = docsToCreate;
-        if (docsToCreate.length) {
-          if (dryRun) {
-            // No DB round trip in a preview — validate client-side instead,
-            // so a dry run's "would create" count matches what a real run
-            // would actually manage, not just what was attempted.
-            actuallyCreated = docsToCreate.filter(({ _unclassified, ...doc }) => {
-              const err = new ProductMasterTenant(doc).validateSync();
-              return !err;
-            });
-          } else {
+        // fails schema validation is silently dropped from the batch with
+        // no thrown error — trusting the attempted list as "created" would
+        // report success for documents never actually written (a real bug
+        // caught earlier this session, when dept/category/sub_category_id
+        // were briefly '' instead of UNCLASSIFIED_ID).
+        if (dryRun) {
+          // No DB round trip in a preview — validate client-side instead,
+          // so a dry run's "would create" count matches what a real run
+          // would actually manage, not just what was attempted.
+          const validNewDocs = newDocs.filter(({ _unclassified, ...doc }) => !new ProductMasterTenant(doc).validateSync());
+          created = validNewDocs.reduce((sum, d) => sum + d.stores.length, 0) + pushOps.reduce((sum, op) => sum + op.storeCodes.length, 0);
+          createdDetails.push(
+            ...validNewDocs.flatMap((d) => d.stores.map((s) => `${d.p_code} (${s.store_code})`)).slice(0, 50)
+          );
+          createdUnclassified = validNewDocs.reduce((sum, d) => sum + d.stores.length, 0);
+          createdUnclassifiedDetails.push(
+            ...validNewDocs.flatMap((d) => d.stores.map((s) => `${d.p_code} (${s.store_code})`)).slice(0, 50)
+          );
+          unresolvablePcodes.push(
+            ...newDocs.filter((d) => !validNewDocs.includes(d)).map((d) => d.p_code)
+          );
+        } else {
+          if (newDocs.length) {
             const inserted = await ProductMasterTenant.insertMany(
-              docsToCreate.map(({ _unclassified, ...doc }) => doc),
+              newDocs.map(({ _unclassified, ...doc }) => doc),
               { ordered: false }
             );
-            const insertedKeys = new Set(inserted.map((d) => `${d.p_code}|${d.store_code}`));
-            actuallyCreated = docsToCreate.filter((d) => insertedKeys.has(`${d.p_code}|${d.store_code}`));
+            const insertedPcodes = new Set(inserted.map((d) => d.p_code));
+            const actuallyInserted = newDocs.filter((d) => insertedPcodes.has(d.p_code));
+            created += actuallyInserted.reduce((sum, d) => sum + d.stores.length, 0);
+            createdDetails.push(...actuallyInserted.flatMap((d) => d.stores.map((s) => `${d.p_code} (${s.store_code})`)));
+            createdUnclassified += actuallyInserted.reduce((sum, d) => sum + d.stores.length, 0);
+            createdUnclassifiedDetails.push(...actuallyInserted.flatMap((d) => d.stores.map((s) => `${d.p_code} (${s.store_code})`)));
+            unresolvablePcodes.push(
+              ...newDocs.filter((d) => !insertedPcodes.has(d.p_code)).map((d) => d.p_code)
+            );
+          }
+          if (pushOps.length) {
+            const result = await ProductMasterTenant.bulkWrite(
+              pushOps.map(({ pcode, storeCodes, ...op }) => op),
+              { ordered: false }
+            );
+            // bulkWrite's own matchedCount is the only trustworthy signal a
+            // given push actually landed (the $nin race guard above means
+            // a lost race matches zero documents, not an error) — a push
+            // this route attempted but didn't match is reported as
+            // unresolvable, same discipline as the insertMany branch above.
+            if (result.matchedCount === pushOps.length) {
+              created += pushOps.reduce((sum, op) => sum + op.storeCodes.length, 0);
+              createdDetails.push(...pushOps.flatMap((op) => op.storeCodes.map((s) => `${op.pcode} (${s})`)));
+            } else {
+              // A partial bulkWrite failure can't be attributed to one op
+              // without re-querying — flag every pushed p_code so it's
+              // never silently reported as created when it might not be.
+              unresolvablePcodes.push(...pushOps.map((op) => op.pcode));
+            }
           }
         }
-        const creationFailed = docsToCreate.filter((d) => !actuallyCreated.includes(d));
-        unresolvablePcodes.push(...creationFailed.map((d) => d.p_code));
-
-        created = actuallyCreated.length;
-        createdDetails.push(...actuallyCreated.slice(0, 50).map((d) => `${d.p_code} (${d.store_code})`));
-        const unclassifiedCreated = actuallyCreated.filter((d) => d._unclassified);
-        createdUnclassified = unclassifiedCreated.length;
-        createdUnclassifiedDetails.push(...unclassifiedCreated.slice(0, 50).map((d) => `${d.p_code} (${d.store_code})`));
       }
 
       // --- Deactivate: active docs for a store this file mentions, whose
@@ -1307,9 +1562,12 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
 
       for (const store of storeCodesInFile) {
         const filePcodes = filePcodesByStore.get(store) || new Set();
-        const currentActive = await ProductMasterTenant.find({ store_code: store, pcode_status: 'Y' })
-          .select('p_code -_id')
-          .lean();
+        // Projected down to just the matching stores[] entry per doc — same
+        // cheapness intent as the old .select('p_code -_id').
+        const currentActive = await ProductMasterTenant.find(
+          { stores: { $elemMatch: { store_code: store, pcode_status: 'Y' } } },
+          { p_code: 1 }
+        ).lean();
         const toDeactivate = currentActive.filter((d) => !filePcodes.has(d.p_code));
         if (toDeactivate.length === 0) continue;
 
@@ -1325,10 +1583,17 @@ router.post('/bulk-update-csv', editPerm, csvUpload.single('file'), async (req, 
         }
 
         if (!dryRun) {
-          await ProductMasterTenant.updateMany(
-            { store_code: store, p_code: { $in: toDeactivate.map((d) => d.p_code) }, pcode_status: 'Y' },
-            { $set: { pcode_status: 'N' } }
-          );
+          // One flat updateMany can no longer reach every target doc — a
+          // top-level store_code match no longer exists — so this is now a
+          // bulkWrite of one arrayFilters-targeted update per p_code.
+          const ops = toDeactivate.map((d) => ({
+            updateOne: {
+              filter: { p_code: d.p_code },
+              update: { $set: { 'stores.$[elem].pcode_status': 'N' } },
+              arrayFilters: [{ 'elem.store_code': store }]
+            }
+          }));
+          await ProductMasterTenant.bulkWrite(ops, { ordered: false });
         }
         deactivated += toDeactivate.length;
         deactivatedCodes.push(...toDeactivate.slice(0, 50).map((d) => `${d.p_code} (${store})`));

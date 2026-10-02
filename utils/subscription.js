@@ -50,6 +50,14 @@ const computeSubscriptionStatus = (sub) => {
 // Total product count for the current tenant, across both catalogue models.
 // Must be called from within a request already routed through tenantResolver
 // (Product/ProductMaster resolve the active tenant DB via the ALS proxy).
+//
+// ProductMaster.countDocuments({}) now returns the real distinct-product
+// count for free (one document per p_code) — before the stores[] redesign
+// it counted one row per (p_code, store), so a tenant selling the same
+// products in N stores consumed N times its real product count against
+// this limit. That inflation is gone as of the migration; a multi-store
+// tenant's reported usage drops accordingly. Confirmed intentional, not a
+// regression to "fix" — see the ProductMaster redesign plan.
 const countTenantProducts = async () => {
   const [productCount, productMasterCount] = await Promise.all([
     Product.countDocuments({}),

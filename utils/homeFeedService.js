@@ -88,22 +88,33 @@ const bySequenceMap = (docs) => {
   return map;
 };
 
-/** Attaches product_details to a best-seller/top-seller section's products. */
-async function enrichProducts(sections) {
+/**
+ * Attaches product_details to a best-seller/top-seller section's products.
+ * storeCode picks which stores[] entry each product's price/stock/status
+ * comes from — the home feed is always built for one store (buildHomeFeed's
+ * own `storeCode` param), so this is never the ambiguous "arbitrary store"
+ * case the shared mapProductMaster also has to tolerate for callers that
+ * genuinely have no store context.
+ */
+async function enrichProducts(sections, storeCode) {
   const codes = Array.from(
     new Set(sections.flatMap((s) => (s.products || []).map((p) => p.p_code)))
   ).filter(Boolean);
 
   if (codes.length === 0) return sections;
 
+  const trimmedStoreCode = (storeCode || '').toString().trim();
   const products = await ProductMaster.find({
     p_code: { $in: codes },
-    pcode_status: 'Y',
+    stores: { $elemMatch: trimmedStoreCode ? { store_code: trimmedStoreCode, pcode_status: 'Y' } : { pcode_status: 'Y' } },
   });
 
   const productMap = new Map();
   products.forEach((product) => {
-    productMap.set(product.p_code, mapProductMaster(product));
+    const listing = trimmedStoreCode
+      ? product.stores.find((s) => s.store_code === trimmedStoreCode)
+      : product.stores.find((s) => s.pcode_status === 'Y');
+    productMap.set(product.p_code, mapProductMaster(product, listing));
   });
 
   return sections.map((section) => ({
@@ -330,14 +341,22 @@ async function couponSection({ storeCode, now = new Date(), limit = 10 } = {}) {
  */
 async function brandSection({ storeCode, limit = 12 } = {}) {
   const trimmed = (storeCode || '').toString().trim();
-  const match = {
-    pcode_status: 'Y',
-    brand_name: { $nin: [null, ''] },
-  };
-  if (trimmed) match.store_code = trimmed;
 
-  const brands = await ProductMaster.aggregate([
-    { $match: match },
+  // pcode_status (and store_code itself) now live inside stores[], not on
+  // the document root — $unwind first so $match can reach them.
+  // product_count keeps meaning "matching store-listings", the same thing
+  // it always meant (one document per store-copy before this; one stores[]
+  // entry per store now) — not "distinct products", a silent definition
+  // change this deliberately avoids.
+  const pipeline = [
+    { $unwind: '$stores' },
+    {
+      $match: {
+        'stores.pcode_status': 'Y',
+        ...(trimmed ? { 'stores.store_code': trimmed } : {}),
+        brand_name: { $nin: [null, ''] },
+      },
+    },
     {
       $group: {
         _id: '$brand_name',
@@ -350,7 +369,9 @@ async function brandSection({ storeCode, limit = 12 } = {}) {
     // Most-stocked first: a brand with three products is not a brand tile.
     { $sort: { product_count: -1, _id: 1 } },
     { $limit: limit },
-  ]);
+  ];
+
+  const brands = await ProductMaster.aggregate(pipeline);
 
   const items = brands
     .filter((brand) => brand._id && String(brand._id).trim())
@@ -554,8 +575,8 @@ async function buildHomeFeed({ storeCode, now = new Date() } = {}) {
   const [popular, seasonal, bestSellers, topSellers] = await Promise.all([
     enrichPopularCategorySections(popularDocs),
     enrichSeasonalCategorySections(seasonalDocs),
-    enrichProducts(bestSellerDocs),
-    enrichProducts(topSellerDocs),
+    enrichProducts(bestSellerDocs, storeCode),
+    enrichProducts(topSellerDocs, storeCode),
   ]);
 
   // A tenant that has never opened the Home Builder has no layout documents,

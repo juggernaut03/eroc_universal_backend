@@ -163,7 +163,13 @@ const normalizeProductsInput = (rawProducts) => {
   });
 };
 
-const mapProductMaster = (product) => ({
+// listing is the one stores[] entry this call resolved for the product —
+// the caller's own store_code when it has one, otherwise the first active
+// listing found (same "arbitrary store wins" ambiguity this already had
+// when every store's price/stock sat directly on the document; it's just
+// explicit now instead of whichever document the DB happened to return
+// first).
+const mapProductMaster = (product, listing) => ({
   id: product._id,
   p_code: product.p_code,
   barcode: product.barcode,
@@ -171,16 +177,16 @@ const mapProductMaster = (product) => ({
   product_description: product.product_description,
   package_size: product.package_size,
   package_unit: product.package_unit,
-  product_mrp: product.product_mrp ? parseFloat(product.product_mrp.toString()) : 0,
-  our_price: product.our_price ? parseFloat(product.our_price.toString()) : 0,
+  product_mrp: listing?.product_mrp ? parseFloat(listing.product_mrp.toString()) : 0,
+  our_price: listing?.our_price ? parseFloat(listing.our_price.toString()) : 0,
   brand_name: product.brand_name,
-  store_code: product.store_code,
-  pcode_status: product.pcode_status,
+  store_code: listing?.store_code,
+  pcode_status: listing?.pcode_status,
   dept_id: product.dept_id,
   category_id: product.category_id,
   sub_category_id: product.sub_category_id,
-  store_quantity: product.store_quantity,
-  max_quantity_allowed: product.max_quantity_allowed,
+  store_quantity: listing?.store_quantity,
+  max_quantity_allowed: listing?.max_quantity_allowed,
   pcode_img: product.pcode_img
 });
 
@@ -409,14 +415,18 @@ router.post('/list', async (req, res, next) => {
         advertisements.flatMap(ad => (ad.products || []).map(product => product.p_code))
       ));
 
+      const trimmedStoreCode = store_code && store_code.toString().trim();
       const productsFromDb = await ProductMaster.find({
         p_code: { $in: productCodes },
-        pcode_status: 'Y'
+        stores: { $elemMatch: trimmedStoreCode ? { store_code: trimmedStoreCode, pcode_status: 'Y' } : { pcode_status: 'Y' } }
       });
 
       const productMap = new Map();
       productsFromDb.forEach((product) => {
-        productMap.set(product.p_code, mapProductMaster(product));
+        const listing = trimmedStoreCode
+          ? product.stores.find((s) => s.store_code === trimmedStoreCode)
+          : product.stores.find((s) => s.pcode_status === 'Y');
+        productMap.set(product.p_code, mapProductMaster(product, listing));
       });
 
       responseData = advertisements.map((ad) => ({
@@ -495,14 +505,18 @@ router.post('/active', async (req, res, next) => {
         advertisements.flatMap(ad => (ad.products || []).map(product => product.p_code))
       ));
 
+      const trimmedStoreCode = store_code && store_code.toString().trim();
       const productsFromDb = await ProductMaster.find({
         p_code: { $in: productCodes },
-        pcode_status: 'Y'
+        stores: { $elemMatch: trimmedStoreCode ? { store_code: trimmedStoreCode, pcode_status: 'Y' } : { pcode_status: 'Y' } }
       });
 
       const productMap = new Map();
       productsFromDb.forEach((product) => {
-        productMap.set(product.p_code, mapProductMaster(product));
+        const listing = trimmedStoreCode
+          ? product.stores.find((s) => s.store_code === trimmedStoreCode)
+          : product.stores.find((s) => s.pcode_status === 'Y');
+        productMap.set(product.p_code, mapProductMaster(product, listing));
       });
 
       responseData = advertisements.map((ad) => ({
@@ -546,12 +560,13 @@ router.get('/:id', async (req, res, next) => {
 
       const productsFromDb = await ProductMaster.find({
         p_code: { $in: productCodes },
-        pcode_status: 'Y'
+        stores: { $elemMatch: { pcode_status: 'Y' } }
       });
 
       const productMap = new Map();
       productsFromDb.forEach((product) => {
-        productMap.set(product.p_code, mapProductMaster(product));
+        const listing = product.stores.find((s) => s.pcode_status === 'Y');
+        productMap.set(product.p_code, mapProductMaster(product, listing));
       });
 
       responseData = {

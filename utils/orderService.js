@@ -78,11 +78,11 @@ const repriceCart = async (cart) => {
   for (const cartItem of cart.items) {
     const product = await ProductMaster.findOne({
       p_code: cartItem.p_code,
-      store_code: cartItem.store_code,
-      pcode_status: 'Y',
+      stores: { $elemMatch: { store_code: cartItem.store_code, pcode_status: 'Y' } },
     }).lean();
+    const listing = product?.stores.find((s) => s.store_code === cartItem.store_code);
 
-    if (!product) {
+    if (!product || !listing) {
       problems.push({
         p_code: cartItem.p_code,
         product_name: cartItem.product_name,
@@ -92,9 +92,9 @@ const repriceCart = async (cart) => {
       continue;
     }
 
-    const unitPrice = toNumber(product.our_price);
-    const stock = product.store_quantity || 0;
-    const maxAllowed = product.max_quantity_allowed || null;
+    const unitPrice = toNumber(listing.our_price);
+    const stock = listing.store_quantity || 0;
+    const maxAllowed = listing.max_quantity_allowed || null;
 
     if (stock <= 0) {
       problems.push({
@@ -136,7 +136,7 @@ const repriceCart = async (cart) => {
     items.push({
       ...base,
       product_name: product.product_name,
-      mrp: toNumber(product.product_mrp) || undefined,
+      mrp: toNumber(listing.product_mrp) || undefined,
       unit_price: unitPrice,
       total_price: round2(unitPrice * cartItem.quantity),
     });
