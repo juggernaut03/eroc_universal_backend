@@ -81,7 +81,13 @@ async function syncProject(projectCode, { triggeredBy, triggeredByEmail } = {}) 
 
   let matchedPrimary = 0;
   let matchedSecondary = 0;
-  const missing = [];
+  let missingCount = 0;
+  // Sample for display: one row per missing p_code, not one per store — a
+  // product missing its image is one missing product, not up to four
+  // identical-looking rows. missingCount above stays store-row-based like
+  // matchedPrimary/total_products so the three stay internally consistent
+  // (matchedPrimary + missingCount === total_products).
+  const missingSample = [];
   const bulkOps = [];
 
   for (const [pcode, docs] of byPcode) {
@@ -104,9 +110,8 @@ async function syncProject(projectCode, { triggeredBy, triggeredByEmail } = {}) 
     }
 
     if (!primarySrc) {
-      // Once per p_code, not once per store — a product missing its image
-      // is one missing product, not up to four.
-      missing.push({ p_code: pcode, barcode: docs[0].barcode, product_name: docs[0].product_name });
+      missingCount += docs.length;
+      missingSample.push({ p_code: pcode, barcode: docs[0].barcode, product_name: docs[0].product_name });
     }
 
     if (Object.keys(update).length > 0) {
@@ -127,8 +132,8 @@ async function syncProject(projectCode, { triggeredBy, triggeredByEmail } = {}) 
     total_products: products.length,
     matched_primary: matchedPrimary,
     matched_secondary: matchedSecondary,
-    missing_count: missing.length,
-    missing_sample: missing.slice(0, 200),
+    missing_count: missingCount,
+    missing_sample: missingSample.slice(0, 200),
     duration_ms: Date.now() - startedAt
   });
 
@@ -137,8 +142,8 @@ async function syncProject(projectCode, { triggeredBy, triggeredByEmail } = {}) 
     total_products: products.length,
     matched_primary: matchedPrimary,
     matched_secondary: matchedSecondary,
-    missing_count: missing.length,
-    missing_sample: missing.slice(0, 200),
+    missing_count: missingCount,
+    missing_sample: missingSample.slice(0, 200),
     run_id: run._id,
     duration_ms: run.duration_ms
   };
