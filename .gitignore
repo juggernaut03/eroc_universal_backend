@@ -149,3 +149,6 @@ uploads/
 test-results/
 junit.xml
 serviceAccountKey.json
+
+# Migration script output (scripts/migrate_productmaster_to_stores_array.js)
+tmp/
