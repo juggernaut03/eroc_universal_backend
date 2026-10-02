@@ -42,6 +42,18 @@ const findPoolFile = (barcode, suffix) => {
 // and copies matches into that tenant's public folder as
 // <p_code>_1.webp / <p_code>_2.webp. Manual-only by design — nothing calls
 // this automatically; it's invoked from the admin "sync now" action.
+//
+// Matching is grouped by p_code, not done per ProductMaster document.
+// A multi-store tenant carries one document per (p_code, store) — the same
+// real product — and each store's own barcode field is independently
+// typed/exported, so it can independently go wrong: one store's export was
+// found with barcodes Excel had mangled into scientific notation
+// ("8.90E+12"), which silently broke matching for that store alone while
+// the other three, with the correct barcode, matched fine. Grouping first
+// means every store-copy's barcode gets a chance to find the pool file, and
+// whichever one works is then written to ALL of that p_code's documents —
+// so the same product can never end up with a different image (or no
+// image) in one store just because of that one store's own bad data.
 async function syncProject(projectCode, { triggeredBy, triggeredByEmail } = {}) {
   const startedAt = Date.now();
   const Project = getProjectModel();
@@ -61,38 +73,45 @@ async function syncProject(projectCode, { triggeredBy, triggeredByEmail } = {}) 
   const tenantDir = path.join(CDN_STORE_ROOT, projectCode);
   await ensureDir(tenantDir);
 
+  const byPcode = new Map();
+  for (const product of products) {
+    if (!byPcode.has(product.p_code)) byPcode.set(product.p_code, []);
+    byPcode.get(product.p_code).push(product);
+  }
+
   let matchedPrimary = 0;
   let matchedSecondary = 0;
   const missing = [];
   const bulkOps = [];
 
-  for (const product of products) {
-    const { p_code: pcode, barcode } = product;
+  for (const [pcode, docs] of byPcode) {
     const update = {};
 
-    const primarySrc = findPoolFile(barcode, 1);
+    const primarySrc = docs.map((d) => findPoolFile(d.barcode, 1)).find(Boolean) || null;
     if (primarySrc) {
       const dest = path.join(tenantDir, `${pcode}_1.webp`);
       await fs.promises.copyFile(primarySrc, dest);
       update.pcode_img = buildImageUrl(projectCode, pcode, 1);
-      matchedPrimary += 1;
+      matchedPrimary += docs.length;
     }
 
-    const secondarySrc = findPoolFile(barcode, 2);
+    const secondarySrc = docs.map((d) => findPoolFile(d.barcode, 2)).find(Boolean) || null;
     if (secondarySrc) {
       const dest = path.join(tenantDir, `${pcode}_2.webp`);
       await fs.promises.copyFile(secondarySrc, dest);
       update.pcode_img_2 = buildImageUrl(projectCode, pcode, 2);
-      matchedSecondary += 1;
+      matchedSecondary += docs.length;
     }
 
     if (!primarySrc) {
-      missing.push({ p_code: pcode, barcode, product_name: product.product_name });
+      // Once per p_code, not once per store — a product missing its image
+      // is one missing product, not up to four.
+      missing.push({ p_code: pcode, barcode: docs[0].barcode, product_name: docs[0].product_name });
     }
 
     if (Object.keys(update).length > 0) {
       bulkOps.push({
-        updateOne: { filter: { _id: product._id }, update: { $set: update } }
+        updateMany: { filter: { project_code: projectCode, p_code: pcode }, update: { $set: update } }
       });
     }
   }
@@ -173,7 +192,11 @@ async function copyPoolFileToTenant(poolPath, projectCode, pcode, suffix) {
   const db = getTenantDb(project.db_name);
   const ProductMaster = db.models.ProductMaster;
   const field = suffix === 1 ? 'pcode_img' : 'pcode_img_2';
-  await ProductMaster.updateOne({ project_code: projectCode, p_code: pcode }, { $set: { [field]: publicUrl } });
+  // updateMany, not updateOne — a multi-store tenant has one document per
+  // (p_code, store); a manually-accepted match is for the product, every
+  // store's copy of it, not just whichever one document this filter
+  // happened to find first.
+  await ProductMaster.updateMany({ project_code: projectCode, p_code: pcode }, { $set: { [field]: publicUrl } });
 
   return publicUrl;
 }
