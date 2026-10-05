@@ -1251,9 +1251,10 @@ router.get('/pincodes', outView, async (req, res) => {
       ];
     }
 
-    // Which pincodes a store covers — used by the Stores page.
+    // Which pincodes a store covers — used by the Stores page. Scalar match
+    // against the store_codes array field means "array contains this value".
     if (storeCode) {
-      query.store_code = storeCode.trim().toUpperCase();
+      query.store_codes = storeCode.trim().toUpperCase();
     }
 
     const sort = {};

@@ -5,15 +5,15 @@ const Pincode = require('../models/Pincode');
 
 /**
  * @route   POST /api/stores/by-pincode
- * @desc    Get the store serving a pincode (includes both enabled and
+ * @desc    Get the store(s) serving a pincode (includes both enabled and
  *          disabled stores)
  * @access  Public
  * @body    { "pincode": "421002" }
- * @response Returns the store with is_enabled indicating status ("Enabled"
- *           or "Disabled"). A store serves many pincodes (Pincode.store_code
- *           — see models/Pincode.js), so this resolves the pincode's
- *           assigned store rather than searching for a store carrying that
- *           pincode itself.
+ * @response Returns every store assigned to this pincode, each with
+ *           is_enabled indicating status ("Enabled" or "Disabled"). A
+ *           pincode can be served by more than one store (Pincode.store_codes
+ *           — see models/Pincode.js); when there's more than one, the client
+ *           is expected to let the customer choose.
  */
 router.post('/by-pincode', async (req, res, next) => {
   try {
@@ -35,10 +35,10 @@ router.post('/by-pincode', async (req, res, next) => {
       });
     }
 
-    // Resolve which store this pincode is assigned to.
+    // Resolve which store(s) this pincode is assigned to.
     const pincodeRecord = await Pincode.findOne({ pincode }).lean();
 
-    if (!pincodeRecord || !pincodeRecord.store_code) {
+    if (!pincodeRecord || !pincodeRecord.store_codes || pincodeRecord.store_codes.length === 0) {
       return res.status(200).json({
         success: true,
         count: 0,
@@ -48,8 +48,7 @@ router.post('/by-pincode', async (req, res, next) => {
       });
     }
 
-    const store = await Store.findOne({ store_code: pincodeRecord.store_code });
-    const stores = store ? [store] : [];
+    const stores = await Store.find({ store_code: { $in: pincodeRecord.store_codes } });
 
     if (!stores || stores.length === 0) {
       return res.status(200).json({
