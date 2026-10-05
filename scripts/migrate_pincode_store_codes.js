@@ -4,11 +4,22 @@
 // (the mobile app's outlet-selection screen already supports this; only the
 // backend ever capped it at one store).
 //
-// Purely additive: never reads, writes, or removes store_code. Safe to run
-// at any time, including against a tenant whose backend hasn't deployed the
-// new routes yet (they keep reading store_code, untouched by this script).
-// Idempotent: a Pincode doc that already has a non-empty store_codes is
-// left alone, so re-running only picks up anything missed previously.
+// Handles two shapes found in production data:
+//   1. One Pincode document per pincode value (the overwhelming majority):
+//      store_code -> store_codes: [store_code]. Purely additive.
+//   2. Multiple Pincode documents sharing the same pincode value, each
+//      pointing at a different store_code (found on RET2690's 493221 —
+//      BHANPURI and BIRGAON both cover it, represented as two duplicate
+//      rows because the old schema had no way to express "one pincode,
+//      several stores"). These are merged into the one with the lowest
+//      idpincode_master, with store_codes set to the union of every
+//      store_code among them (deduped) and is_enabled set to Enabled if
+//      any of them was — then the other row(s) are deleted.
+//
+// Never reads/writes the legacy store_code field, so running this against a
+// tenant whose backend hasn't deployed the new routes yet is harmless (they
+// keep reading store_code). Idempotent: a pincode value whose merged
+// store_codes already covers every store_code among its row(s) is skipped.
 //
 //   node scripts/migrate_pincode_store_codes.js                # dry run
 //   node scripts/migrate_pincode_store_codes.js --apply
@@ -27,18 +38,63 @@ async function migrateProject(project) {
   const db = getTenantDb(project.db_name);
   const Pincode = db.models.Pincode;
 
-  const candidates = await Pincode.find({
-    store_code: { $nin: [null, ''] },
-    $or: [{ store_codes: { $exists: false } }, { store_codes: { $size: 0 } }],
-  }).lean();
+  const allDocs = await Pincode.find({}).lean();
+  const byPincode = new Map();
+  for (const doc of allDocs) {
+    if (!byPincode.has(doc.pincode)) byPincode.set(doc.pincode, []);
+    byPincode.get(doc.pincode).push(doc);
+  }
 
-  console.log(`\n=== ${project.project_code} (${project.db_name}) — ${candidates.length} pincode(s) to backfill ===`);
+  let plannedChanges = 0;
+  console.log(`\n=== ${project.project_code} (${project.db_name}) — ${byPincode.size} distinct pincode(s), ${allDocs.length} row(s) ===`);
 
-  for (const doc of candidates) {
-    console.log(`  ${doc.pincode}: store_code ${doc.store_code} -> store_codes [${doc.store_code}]`);
-    if (apply) {
-      await Pincode.updateOne({ _id: doc._id }, { $set: { store_codes: [doc.store_code] } });
+  for (const [pincodeValue, docs] of byPincode) {
+    const mergedCodes = [...new Set(
+      docs.flatMap((d) => [...(d.store_codes || []), d.store_code].filter(Boolean))
+    )];
+
+    if (docs.length === 1) {
+      const [doc] = docs;
+      const already = [...(doc.store_codes || [])].sort().join(',') === [...mergedCodes].sort().join(',');
+      if (mergedCodes.length === 0 || already) continue;
+      plannedChanges++;
+      console.log(`  ${pincodeValue}: store_code ${doc.store_code} -> store_codes [${mergedCodes.join(', ')}]`);
+      if (apply) {
+        await Pincode.updateOne({ _id: doc._id }, { $set: { store_codes: mergedCodes } });
+      }
+      continue;
     }
+
+    // Multiple rows for the same pincode value — merge into the oldest
+    // (lowest idpincode_master), delete the rest.
+    const sorted = [...docs].sort((a, b) => a.idpincode_master - b.idpincode_master);
+    const canonical = sorted[0];
+    const extras = sorted.slice(1);
+    const anyEnabled = docs.some((d) => d.is_enabled === 'Enabled');
+    const alreadyMerged =
+      [...(canonical.store_codes || [])].sort().join(',') === [...mergedCodes].sort().join(',') &&
+      extras.length === 0;
+
+    if (alreadyMerged) continue;
+    plannedChanges++;
+    console.log(
+      `  ${pincodeValue}: ${docs.length} rows [${docs.map((d) => `${d.store_code}#${d.idpincode_master}`).join(', ')}] ` +
+      `-> keeping #${canonical.idpincode_master} with store_codes [${mergedCodes.join(', ')}], ` +
+      `deleting #${extras.map((d) => d.idpincode_master).join(', #')}`
+    );
+    if (apply) {
+      await Pincode.updateOne(
+        { _id: canonical._id },
+        { $set: { store_codes: mergedCodes, is_enabled: anyEnabled ? 'Enabled' : canonical.is_enabled } }
+      );
+      if (extras.length > 0) {
+        await Pincode.deleteMany({ _id: { $in: extras.map((d) => d._id) } });
+      }
+    }
+  }
+
+  if (plannedChanges === 0) {
+    console.log('  (nothing to do)');
   }
 }
 
