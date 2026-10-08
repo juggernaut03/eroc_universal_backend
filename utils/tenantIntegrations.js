@@ -25,7 +25,7 @@ const loadSecrets = async (projectCode) => {
 
   const Project = getProjectModel();
   const doc = await Project.findOne({ project_code: projectCode })
-    .select('+secrets.razorpay_key_secret +secrets.sms_api_key')
+    .select('+secrets.razorpay_key_secret +secrets.sms_api_key +secrets.picker_webhook_secret')
     .lean();
 
   const secrets = doc?.secrets || {};
@@ -124,8 +124,28 @@ const getSmsConfig = (project) => {
   };
 };
 
+/**
+ * SHALVI PICKER (warehouse picking + rider delivery) webhook config for the
+ * current tenant. `enabled` is false unless explicitly turned on from the
+ * admin panel's Integrations page, after webhook_url/secret are set and a
+ * pilot order has been walked through end to end.
+ */
+const getPickerIntegrationConfig = async (project) => {
+  const tenant = project || getTenantProject();
+  if (!tenant?.project_code) return { enabled: false };
+
+  const secrets = await loadSecrets(tenant.project_code);
+  return {
+    enabled: tenant.config?.picker_integration_enabled === 'true',
+    webhookUrl: tenant.config?.picker_webhook_url || '',
+    webhookSecret: secrets.picker_webhook_secret || '',
+    projectCode: tenant.project_code,
+  };
+};
+
 module.exports = {
   getRazorpayCredentials,
   getSmsConfig,
+  getPickerIntegrationConfig,
   clearSecretsCache,
 };

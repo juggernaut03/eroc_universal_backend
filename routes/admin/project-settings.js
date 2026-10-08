@@ -63,11 +63,22 @@ const EDITABLE_FIELDS = [
 // Integrations page by super admins only — a wrong payment key id breaks
 // checkout for every user, which is a different class of mistake from a wrong
 // brand colour. Secrets are never in this list; see the /secrets route.
-const INTEGRATION_FIELDS = ['razorpay_key_id', 'currency', 'google_maps_api_key'];
+const INTEGRATION_FIELDS = [
+  'razorpay_key_id',
+  'currency',
+  'google_maps_api_key',
+  'picker_integration_enabled',
+  'picker_webhook_url',
+];
 
 // Write-only. Stored on project.secrets (select: false) and never returned by
 // any endpoint — the panel shows whether one is set, never its value.
-const SECRET_FIELDS = ['razorpay_key_secret', 'sms_api_key', 'firebase_service_account_json'];
+const SECRET_FIELDS = [
+  'razorpay_key_secret',
+  'sms_api_key',
+  'firebase_service_account_json',
+  'picker_webhook_secret',
+];
 
 const COLOR_FIELDS = EDITABLE_FIELDS.filter((f) => f.endsWith('_color'));
 const HEX_COLOR = /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
@@ -207,7 +218,7 @@ router.get('/integrations', requireSuperAdmin, async (req, res) => {
     // secrets are select:false — ask for them explicitly, and only to report
     // whether they exist.
     const project = await Project.findOne({ project_code: req.tenant.projectCode })
-      .select('+secrets.razorpay_key_secret +secrets.sms_api_key +secrets.firebase_service_account_json')
+      .select('+secrets.razorpay_key_secret +secrets.sms_api_key +secrets.firebase_service_account_json +secrets.picker_webhook_secret')
       .lean();
 
     if (!project) {
@@ -255,6 +266,9 @@ router.put('/integrations', requireSuperAdmin, async (req, res) => {
       }
       if (field === 'currency' && value && !/^[A-Za-z]{3}$/.test(value)) {
         return res.status(400).json({ success: false, message: 'currency must be a 3-letter code like INR' });
+      }
+      if (field === 'picker_integration_enabled' && value && value !== 'true' && value !== 'false') {
+        return res.status(400).json({ success: false, message: 'picker_integration_enabled must be "true" or "false"' });
       }
 
       $set[`config.${field}`] = field === 'currency' ? value.toUpperCase() : value;

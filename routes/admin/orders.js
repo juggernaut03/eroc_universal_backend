@@ -295,6 +295,28 @@ router.patch('/:id/status', checkPermission('orders', 'edit'), async (req, res) 
     // records who made the change on the order's timeline.
     await order.updateStatus(status, adminActor(req.user), note);
 
+    // Fire-and-forget: hand the order to SHALVI PICKER for warehouse
+    // fulfillment the moment the store confirms it — a no-op for any tenant
+    // that hasn't turned this integration on (see utils/pickerIntegration.js).
+    // Deliberately NOT inside order.updateStatus() itself: that method is
+    // also called from the inbound Picker-status-sync webhook
+    // (routes/webhooks/picker.js), where re-triggering a handoff on every
+    // synced status would be wrong — this call only fires from a real
+    // admin action.
+    if (status === ORDER_STATUS.ACCEPTED_BY_STORE) {
+      require('../../utils/pickerIntegration')
+        .sendOrderToPicker(order, req.tenant.project)
+        .catch((e) => console.error('[picker-integration] handoff error:', e.message));
+    } else if (status === ORDER_STATUS.CANCELLED) {
+      // Only reaches Picker if the order was actually handed off already —
+      // sendOrderCancelToPicker no-ops the same way sendOrderToPicker does
+      // for a tenant without Picker enabled, and Picker's own cancel
+      // endpoint is a no-op for an orders_idorders it never received.
+      require('../../utils/pickerIntegration')
+        .sendOrderCancelToPicker(order, req.tenant.project, note)
+        .catch((e) => console.error('[picker-integration] cancel-sync error:', e.message));
+    }
+
     // Create in-app notification for the user (API-based, no Firebase)
     if (order.mobile_no) {
       console.log(`📋 Looking up user for mobile: ${order.mobile_no}`);

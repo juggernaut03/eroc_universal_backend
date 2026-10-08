@@ -84,11 +84,20 @@ const projectSchema = new mongoose.Schema(
       // launch and calls the platform's icon-switch API; nothing happens
       // for a build that never bundled the variant being asked for.
       active_app_icon: { type: String, enum: ['default', 'festival', 'premium'], default: 'default' },
+      // SHALVI PICKER (warehouse picking + rider delivery) integration.
+      // Off by default — each tenant is turned on individually once its
+      // webhook URL/secret are configured and a pilot order has been
+      // walked through end to end. See utils/pickerIntegration.js.
+      picker_integration_enabled: { type: String, default: '' },
+      picker_webhook_url: { type: String, default: '' },
     },
     // Server-side only credentials (never returned by public endpoints).
     secrets: {
       razorpay_key_secret: { type: String, default: '', select: false },
       sms_api_key: { type: String, default: '', select: false },
+      // Shared secret sent as X-Webhook-Secret on every order handed off to
+      // Picker, and required on inbound status callbacks from Picker.
+      picker_webhook_secret: { type: String, default: '', select: false },
       // Full Admin SDK service account JSON (as a string) for this tenant's
       // OWN Firebase project. Each app flavor mints FCM tokens against its
       // own project (android/app/src/<flavor>/google-services.json), not a
