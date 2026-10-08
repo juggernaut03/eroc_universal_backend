@@ -10,7 +10,25 @@ const { getPickerIntegrationConfig } = require('./tenantIntegrations');
 
 const REQUEST_TIMEOUT_MS = 10_000;
 
-// Where Picker should POST status updates back to — see routes/webhooks/picker.js.
+// Two different secrets, two different directions — do not conflate them:
+//
+// 1. PICKER_SHARED_WEBHOOK_SECRET (env, platform-wide): the secret Picker's
+//    OWN deployment requires on every inbound call to its
+//    /api/webhook/order* endpoints (picker_app_backend's WEBHOOK_SECRET —
+//    one fixed value for every caller, not something Universal gets to
+//    choose per tenant). Sent as the X-Webhook-Secret header BY this file.
+//
+// 2. config.webhookSecret (project.secrets.picker_webhook_secret, per
+//    tenant, generated when the integration is configured): the secret
+//    Universal owns for the OPPOSITE direction — it's handed to Picker as
+//    upstream_webhook_secret so Picker sends it back as X-Webhook-Secret
+//    when it POSTs to routes/picker-webhook.js, which validates incoming
+//    requests against this same per-tenant value.
+function pickerSharedSecret() {
+  return process.env.PICKER_SHARED_WEBHOOK_SECRET || '';
+}
+
+// Where Picker should POST status updates back to — see routes/picker-webhook.js.
 function ownCallbackUrl() {
   const base = process.env.PUBLIC_API_BASE_URL || '';
   return base ? `${base.replace(/\/$/, '')}/api/webhook/picker/status` : null;
@@ -34,7 +52,8 @@ function buildItemsPayload(order) {
 
 async function postToPicker(path, body, config) {
   const headers = { 'Content-Type': 'application/json' };
-  if (config.webhookSecret) headers['X-Webhook-Secret'] = config.webhookSecret;
+  const sharedSecret = pickerSharedSecret();
+  if (sharedSecret) headers['X-Webhook-Secret'] = sharedSecret;
 
   const res = await fetch(`${config.webhookUrl.replace(/\/$/, '')}${path}`, {
     method: 'POST',
