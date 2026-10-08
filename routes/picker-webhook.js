@@ -50,10 +50,12 @@ router.post('/status', async (req, res) => {
     }
 
     // orders_idorders is Universal's own order_number (see
-    // utils/pickerIntegration.js) — unique within this tenant's own DB, no
-    // extra project scoping needed since the tenant proxy already resolved
-    // us to the right one.
-    const order = await Order.findOne({ order_number: String(orders_idorders) });
+    // utils/pickerIntegration.js), but Picker stores/sends it back as a
+    // Number ("0068" -> 68, stripping the leading zeros) — re-pad to
+    // Universal's 4-digit format before looking it up. Unique within this
+    // tenant's own DB, no extra project scoping needed since the tenant
+    // proxy already resolved us to the right one.
+    const order = await Order.findOne({ order_number: String(orders_idorders).padStart(4, '0') });
     if (!order) {
       return res.status(404).json({ success: false, message: `Order ${orders_idorders} not found` });
     }
