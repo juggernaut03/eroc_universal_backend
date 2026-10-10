@@ -276,6 +276,11 @@ app.get('/api-docs.json', (req, res) => {
   res.send(swaggerSpec);
 });
 
+// Public promo/download landing page — project code comes from the URL
+// path, not X-Project-Code, so this is mounted BEFORE tenantResolver and
+// resolves its own tenant internally (see routes/public-promo-page.js).
+app.use('/api/public/promo-page', require('./routes/public-promo-page'));
+
 // Multi-tenant resolution — every /api request is bound to its client DB via
 // X-Project-Code header (or project_code in body/query, or DEFAULT_PROJECT_CODE)
 app.use('/api', tenantResolver);

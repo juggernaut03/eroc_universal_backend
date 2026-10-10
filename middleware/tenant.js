@@ -75,4 +75,4 @@ const tenantResolver = async (req, res, next) => {
 
 const clearTenantCache = () => cache.clear();
 
-module.exports = { tenantResolver, clearTenantCache };
+module.exports = { tenantResolver, clearTenantCache, resolveProject };
