@@ -63,17 +63,20 @@ router.post('/place-order', protect, async (req, res, next) => {
       }
     })
       .then((saved) => {
-        const io = req.app.get('io');
-        if (io) {
-          io.to('admins').emit('new-admin-notification', {
-            _id: saved._id,
-            title: saved.title,
-            body: saved.body,
-            type: saved.type,
-            data: saved.data,
-            isRead: false,
-            createdAt: saved.createdAt
-          });
+        const emitAdminNotification = req.app.get('emitAdminNotification');
+        if (emitAdminNotification) {
+          emitAdminNotification(
+            {
+              _id: saved._id,
+              title: saved.title,
+              body: saved.body,
+              type: saved.type,
+              data: saved.data,
+              isRead: false,
+              createdAt: saved.createdAt
+            },
+            { projectCode: req.tenant?.projectCode, storeCode: savedOrder.store_code }
+          );
         }
       })
       .catch(err => console.error('Admin notification error:', err));

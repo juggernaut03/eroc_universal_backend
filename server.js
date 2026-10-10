@@ -363,7 +363,9 @@ const startServer = async () => {
         if (!token) return next(new Error('No token'));
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET || 'your-secret-key');
-        const user = await User.findById(decoded.id).select('role name mobile');
+        const user = await User.findById(decoded.id).select(
+          'role name mobile isSuperAdmin allowed_project_codes allowed_store_codes'
+        );
         if (!user || user.role !== 'admin') return next(new Error('Not admin'));
 
         socket.user = user;
@@ -374,13 +376,32 @@ const startServer = async () => {
     });
 
     io.on('connection', (socket) => {
-      // Join admin room for broadcast notifications
+      // Kept for true platform-wide broadcasts (e.g. a future 'system' alert
+      // to every admin) — order notifications use emitAdminNotification
+      // below instead, which is project + store scoped per admin.
       socket.join('admins');
       console.log(`🔌 Admin connected: ${socket.user?.name || socket.user?.mobile}`);
 
       socket.on('disconnect', () => {
         console.log(`🔌 Admin disconnected: ${socket.user?.name || socket.user?.mobile}`);
       });
+    });
+
+    // Push a notification only to admins who can actually see this
+    // project/store, mirroring User.canAccessStore's semantics: super
+    // admins see everything, an admin with no allowed_store_codes sees
+    // every store in their allowed projects, otherwise only their listed
+    // stores. storeCode may be omitted for non-order notification types.
+    app.set('emitAdminNotification', (notification, { projectCode, storeCode } = {}) => {
+      for (const socket of io.sockets.sockets.values()) {
+        const u = socket.user;
+        if (!u) continue;
+        if (!u.isSuperAdmin) {
+          if (projectCode && !u.allowed_project_codes?.includes(projectCode)) continue;
+          if (storeCode && u.allowed_store_codes?.length && !u.allowed_store_codes.includes(storeCode)) continue;
+        }
+        socket.emit('new-admin-notification', notification);
+      }
     });
 
     server.listen(PORT, () => {

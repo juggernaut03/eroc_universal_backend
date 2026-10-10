@@ -8,6 +8,21 @@ const {
 const AdminNotification = require('../../models/AdminNotification');
 const { checkPermission } = require('../../middleware/checkPermission');
 
+// Mirrors User.canAccessStore: a super admin or one with no allowed_store_codes
+// sees every notification; otherwise only ones tagged with one of their stores.
+// Notifications with no store_code (e.g. a future platform-wide 'system' alert)
+// are never filtered out by this.
+const storeScopeFilter = (user) => {
+  if (user.isSuperAdmin) return {};
+  if (!user.allowed_store_codes || user.allowed_store_codes.length === 0) return {};
+  return {
+    $or: [
+      { 'data.store_code': { $in: user.allowed_store_codes } },
+      { 'data.store_code': { $exists: false } }
+    ]
+  };
+};
+
 // @route   POST /api/admin/notifications/send-to-user
 // @desc    Send push notification to a specific user
 // @access  Private/Admin
@@ -32,15 +47,16 @@ router.get('/admin-alerts', checkPermission('notifications', 'view'), async (req
   try {
     const { page = 1, limit = 20 } = req.query;
     const skip = (parseInt(page) - 1) * parseInt(limit);
+    const scope = storeScopeFilter(req.user);
 
     const [notifications, total, unreadCount] = await Promise.all([
-      AdminNotification.find()
+      AdminNotification.find(scope)
         .sort({ createdAt: -1 })
         .skip(skip)
         .limit(parseInt(limit))
         .lean(),
-      AdminNotification.countDocuments(),
-      AdminNotification.countDocuments({ isRead: false })
+      AdminNotification.countDocuments(scope),
+      AdminNotification.countDocuments({ ...scope, isRead: false })
     ]);
 
     res.status(200).json({
@@ -65,7 +81,8 @@ router.get('/admin-alerts', checkPermission('notifications', 'view'), async (req
 // @access  Private/Admin
 router.get('/admin-alerts/unread-count', checkPermission('notifications', 'view'), async (req, res) => {
   try {
-    const count = await AdminNotification.countDocuments({ isRead: false });
+    const scope = storeScopeFilter(req.user);
+    const count = await AdminNotification.countDocuments({ ...scope, isRead: false });
     res.status(200).json({ success: true, data: { count } });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -77,7 +94,8 @@ router.get('/admin-alerts/unread-count', checkPermission('notifications', 'view'
 // @access  Private/Admin
 router.put('/admin-alerts/mark-read', checkPermission('notifications', 'view'), async (req, res) => {
   try {
-    await AdminNotification.updateMany({ isRead: false }, { isRead: true });
+    const scope = storeScopeFilter(req.user);
+    await AdminNotification.updateMany({ ...scope, isRead: false }, { isRead: true });
     res.status(200).json({ success: true, message: 'All notifications marked as read' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -89,7 +107,8 @@ router.put('/admin-alerts/mark-read', checkPermission('notifications', 'view'), 
 // @access  Private/Admin
 router.put('/admin-alerts/:id/read', checkPermission('notifications', 'view'), async (req, res) => {
   try {
-    await AdminNotification.findByIdAndUpdate(req.params.id, { isRead: true });
+    const scope = storeScopeFilter(req.user);
+    await AdminNotification.findOneAndUpdate({ _id: req.params.id, ...scope }, { isRead: true });
     res.status(200).json({ success: true });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
@@ -101,7 +120,8 @@ router.put('/admin-alerts/:id/read', checkPermission('notifications', 'view'), a
 // @access  Private/Admin
 router.delete('/admin-alerts/:id', checkPermission('notifications', 'delete'), async (req, res) => {
   try {
-    await AdminNotification.findByIdAndDelete(req.params.id);
+    const scope = storeScopeFilter(req.user);
+    await AdminNotification.findOneAndDelete({ _id: req.params.id, ...scope });
     res.status(200).json({ success: true, message: 'Notification deleted' });
   } catch (error) {
     res.status(500).json({ success: false, message: error.message });
