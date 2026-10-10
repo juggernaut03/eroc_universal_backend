@@ -296,14 +296,21 @@ router.patch('/:id/status', checkPermission('orders', 'edit'), async (req, res) 
     await order.updateStatus(status, adminActor(req.user), note);
 
     // Fire-and-forget: hand the order to SHALVI PICKER for warehouse
-    // fulfillment the moment the store confirms it — a no-op for any tenant
+    // fulfillment the moment the admin accepts it — a no-op for any tenant
     // that hasn't turned this integration on (see utils/pickerIntegration.js).
+    // Fires on ACCEPTED (the first/only manual click, labelled "Accept" in
+    // the admin panel) rather than waiting for the separate ACCEPTED_BY_STORE
+    // step — Picker's own picking_started sync already jumps the order
+    // straight to IN_PACKAGING (see routes/picker-webhook.js's
+    // EVENT_TO_STATUS), so accepted_by_store was never actually reached on
+    // the automatic path; this just removes the redundant manual click
+    // before handoff too.
     // Deliberately NOT inside order.updateStatus() itself: that method is
     // also called from the inbound Picker-status-sync webhook
     // (routes/webhooks/picker.js), where re-triggering a handoff on every
     // synced status would be wrong — this call only fires from a real
     // admin action.
-    if (status === ORDER_STATUS.ACCEPTED_BY_STORE) {
+    if (status === ORDER_STATUS.ACCEPTED) {
       require('../../utils/pickerIntegration')
         .sendOrderToPicker(order, req.tenant.project)
         .catch((e) => console.error('[picker-integration] handoff error:', e.message));
