@@ -1,5 +1,5 @@
 // Hands an order off to SHALVI PICKER (warehouse picking + rider delivery)
-// once a store confirms it, and lets Picker know if it's later cancelled.
+// the moment it's placed, and lets Picker know if it's later cancelled.
 // Fire-and-forget, same pattern as utils/loyaltyOrderHooks.js's hooks — never
 // blocks or fails the status change that triggered it.
 //
@@ -69,9 +69,11 @@ async function postToPicker(path, body, config) {
 }
 
 /**
- * Hands one order off to Picker for warehouse fulfillment. Call once, when
- * an order reaches accepted_by_store — Picker's own duplicate check
- * (scoped by project_code + orders_idorders) makes a repeat call harmless.
+ * Hands one order off to Picker for warehouse fulfillment. Call once, right
+ * after the order is placed (still 'pending' — no admin action required) so
+ * a picker is auto-assigned immediately. Picker's own duplicate check
+ * (scoped by project_code + orders_idorders) makes a repeat call harmless,
+ * so calling this again later is always safe.
  */
 async function sendOrderToPicker(order, project) {
   const config = await getPickerIntegrationConfig(project);

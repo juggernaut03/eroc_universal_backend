@@ -49,6 +49,14 @@ router.post('/place-order', protect, async (req, res, next) => {
       );
     }
 
+    // Fire-and-forget: hand the order to SHALVI PICKER the moment it's
+    // placed (still 'pending' here — no admin action required) so a picker
+    // can be auto-assigned immediately. A no-op for any tenant that hasn't
+    // turned this integration on (see utils/pickerIntegration.js).
+    require('../utils/pickerIntegration')
+      .sendOrderToPicker(savedOrder, req.tenant.project)
+      .catch((e) => console.error('[picker-integration] handoff error:', e.message));
+
     AdminNotification.create({
       title: 'New Order Placed',
       body: `Order #${savedOrder.order_number} — ₹${savedOrder.order_summary.total_amount} by ${req.user?.name || req.user?.mobile || 'Customer'}`,
@@ -289,6 +297,14 @@ router.post('/:orderNumber/cancel', protect, async (req, res, next) => {
     require('../utils/loyaltyOrderHooks')
       .onOrderCancelledOrRefunded(order)
       .catch((e) => console.error('[loyalty] cancel hook error:', e));
+
+    // The order was handed to Picker at placement, so a customer cancelling
+    // it themselves (before a store ever touches it) still needs to reach
+    // Picker too — same no-op-if-not-enabled/never-received pattern as the
+    // admin cancel path (routes/admin/orders.js).
+    require('../utils/pickerIntegration')
+      .sendOrderCancelToPicker(order, req.tenant.project, order.cancel_reason)
+      .catch((e) => console.error('[picker-integration] cancel-sync error:', e.message));
 
     res.status(200).json({
       success: true,

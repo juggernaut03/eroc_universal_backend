@@ -295,26 +295,17 @@ router.patch('/:id/status', checkPermission('orders', 'edit'), async (req, res) 
     // records who made the change on the order's timeline.
     await order.updateStatus(status, adminActor(req.user), note);
 
-    // Fire-and-forget: hand the order to SHALVI PICKER for warehouse
-    // fulfillment the moment the admin accepts it — a no-op for any tenant
-    // that hasn't turned this integration on (see utils/pickerIntegration.js).
-    // Fires on ACCEPTED (the first/only manual click, labelled "Accept" in
-    // the admin panel) rather than waiting for the separate ACCEPTED_BY_STORE
-    // step — Picker's own picking_started sync already jumps the order
-    // straight to IN_PACKAGING (see routes/picker-webhook.js's
-    // EVENT_TO_STATUS), so accepted_by_store was never actually reached on
-    // the automatic path; this just removes the redundant manual click
-    // before handoff too.
-    // Deliberately NOT inside order.updateStatus() itself: that method is
-    // also called from the inbound Picker-status-sync webhook
-    // (routes/webhooks/picker.js), where re-triggering a handoff on every
-    // synced status would be wrong — this call only fires from a real
-    // admin action.
-    if (status === ORDER_STATUS.ACCEPTED) {
-      require('../../utils/pickerIntegration')
-        .sendOrderToPicker(order, req.tenant.project)
-        .catch((e) => console.error('[picker-integration] handoff error:', e.message));
-    } else if (status === ORDER_STATUS.CANCELLED) {
+    // The Picker handoff itself now fires at order placement (see
+    // routes/orders.js's POST /place-order), not from any admin status
+    // click — a picker is auto-assigned immediately while the order is
+    // still 'pending', no admin action required. A cancellation can still
+    // happen from here though, at any stage, so that still needs to reach
+    // Picker. Deliberately NOT inside order.updateStatus() itself: that
+    // method is also called from the inbound Picker-status-sync webhook
+    // (routes/webhooks/picker.js), where re-triggering a cancel-sync on
+    // every synced status would be wrong — this call only fires from a
+    // real admin action.
+    if (status === ORDER_STATUS.CANCELLED) {
       // Only reaches Picker if the order was actually handed off already —
       // sendOrderCancelToPicker no-ops the same way sendOrderToPicker does
       // for a tenant without Picker enabled, and Picker's own cancel
