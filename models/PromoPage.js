@@ -31,6 +31,12 @@ const promoPageSchema = new mongoose.Schema(
       type: Boolean,
       default: false
     },
+    // Short eyebrow lines above the headline (e.g. "Grocery • Daily
+    // Essentials") — plain text, no icon, unlike `bullets` below.
+    top_tags: {
+      type: [String],
+      default: []
+    },
     headline: {
       type: String,
       trim: true,

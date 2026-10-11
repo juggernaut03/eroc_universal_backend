@@ -10,6 +10,7 @@ const view = checkPermission('promoPage', 'view');
 const edit = checkPermission('promoPage', 'edit');
 
 const MAX_BULLETS = 4;
+const MAX_TOP_TAGS = 4;
 
 // @route   GET /api/admin/promo-page
 // @desc    Get this tenant's promo/download landing page config (creates a
@@ -24,6 +25,7 @@ router.get('/', view, async (req, res) => {
       success: true,
       data: promo || {
         is_enabled: false,
+        top_tags: [],
         headline: '',
         subheadline: '',
         hero_image_url: '',
@@ -44,7 +46,16 @@ router.get('/', view, async (req, res) => {
 // @access  Private/Admin (promoPage:edit)
 router.put('/', edit, async (req, res) => {
   try {
-    const { is_enabled, headline, subheadline, hero_image_url, bullets, android_url, ios_url } = req.body;
+    const { is_enabled, top_tags, headline, subheadline, hero_image_url, bullets, android_url, ios_url } = req.body;
+
+    if (top_tags !== undefined) {
+      if (!Array.isArray(top_tags)) {
+        return res.status(400).json({ success: false, message: 'top_tags must be an array' });
+      }
+      if (top_tags.length > MAX_TOP_TAGS) {
+        return res.status(400).json({ success: false, message: `At most ${MAX_TOP_TAGS} top tags are allowed` });
+      }
+    }
 
     if (bullets !== undefined) {
       if (!Array.isArray(bullets)) {
@@ -62,6 +73,9 @@ router.put('/', edit, async (req, res) => {
 
     const update = {};
     if (is_enabled !== undefined) update.is_enabled = Boolean(is_enabled);
+    if (top_tags !== undefined) {
+      update.top_tags = top_tags.map((t) => String(t || '').trim()).filter(Boolean);
+    }
     if (headline !== undefined) update.headline = String(headline).trim();
     if (subheadline !== undefined) update.subheadline = String(subheadline).trim();
     if (hero_image_url !== undefined) update.hero_image_url = String(hero_image_url).trim();
