@@ -158,6 +158,12 @@ router.get('/:projectCode', async (req, res) => {
             background_color: promo.background_color || '',
             headline_color: promo.headline_color || '',
             button_color: promo.button_color || '',
+            highlights_bg_color: promo.highlights_bg_color || '',
+            highlights_title_color: promo.highlights_title_color || '',
+            highlights_subtitle_color: promo.highlights_subtitle_color || '',
+            picks_bg_color: promo.picks_bg_color || '',
+            category_bg_color: promo.category_bg_color || '',
+            card_bg_color: promo.card_bg_color || '',
             bullets: promo.bullets,
             android_url: promo.android_url,
             ios_url: promo.ios_url

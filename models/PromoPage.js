@@ -1,6 +1,10 @@
 const mongoose = require('mongoose');
 const { PROMO_BULLET_ICONS } = require('../utils/promoBulletIcons');
 
+// Hex colors, e.g. "#1565C0". Empty means "use the page's built-in default"
+// — same convention as Project.config's *_color fields.
+const colorField = () => ({ type: String, trim: true, default: '' });
+
 const promoBulletSchema = new mongoose.Schema(
   {
     icon: {
@@ -52,23 +56,19 @@ const promoPageSchema = new mongoose.Schema(
       trim: true,
       default: ''
     },
-    // Hex colors, e.g. "#1565C0". Empty means "use the page's built-in
-    // default" — same convention as Project.config's *_color fields.
-    background_color: {
-      type: String,
-      trim: true,
-      default: ''
-    },
-    headline_color: {
-      type: String,
-      trim: true,
-      default: ''
-    },
-    button_color: {
-      type: String,
-      trim: true,
-      default: ''
-    },
+    background_color: colorField(),
+    headline_color: colorField(),
+    button_color: colorField(),
+    // Highlights section
+    highlights_bg_color: colorField(),
+    highlights_title_color: colorField(),
+    highlights_subtitle_color: colorField(),
+    // "Today's Special Picks" / "Shop by Category" sections — each gets its
+    // own section background; the product/category cards in both share one
+    // card background color.
+    picks_bg_color: colorField(),
+    category_bg_color: colorField(),
+    card_bg_color: colorField(),
     bullets: {
       type: [promoBulletSchema],
       default: []
