@@ -52,6 +52,23 @@ const promoPageSchema = new mongoose.Schema(
       trim: true,
       default: ''
     },
+    // Hex colors, e.g. "#1565C0". Empty means "use the page's built-in
+    // default" — same convention as Project.config's *_color fields.
+    background_color: {
+      type: String,
+      trim: true,
+      default: ''
+    },
+    headline_color: {
+      type: String,
+      trim: true,
+      default: ''
+    },
+    button_color: {
+      type: String,
+      trim: true,
+      default: ''
+    },
     bullets: {
       type: [promoBulletSchema],
       default: []

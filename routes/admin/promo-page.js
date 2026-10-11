@@ -11,6 +11,8 @@ const edit = checkPermission('promoPage', 'edit');
 
 const MAX_BULLETS = 4;
 const MAX_TOP_TAGS = 4;
+const HEX_COLOR = /^#([0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+const COLOR_FIELDS = ['background_color', 'headline_color', 'button_color'];
 
 // @route   GET /api/admin/promo-page
 // @desc    Get this tenant's promo/download landing page config (creates a
@@ -29,6 +31,9 @@ router.get('/', view, async (req, res) => {
         headline: '',
         subheadline: '',
         hero_image_url: '',
+        background_color: '',
+        headline_color: '',
+        button_color: '',
         bullets: [],
         android_url: '',
         ios_url: ''
@@ -46,7 +51,26 @@ router.get('/', view, async (req, res) => {
 // @access  Private/Admin (promoPage:edit)
 router.put('/', edit, async (req, res) => {
   try {
-    const { is_enabled, top_tags, headline, subheadline, hero_image_url, bullets, android_url, ios_url } = req.body;
+    const {
+      is_enabled,
+      top_tags,
+      headline,
+      subheadline,
+      hero_image_url,
+      background_color,
+      headline_color,
+      button_color,
+      bullets,
+      android_url,
+      ios_url
+    } = req.body;
+
+    for (const field of COLOR_FIELDS) {
+      const value = req.body[field];
+      if (value && !HEX_COLOR.test(value)) {
+        return res.status(400).json({ success: false, message: `${field} must be a hex color like #RRGGBB` });
+      }
+    }
 
     if (top_tags !== undefined) {
       if (!Array.isArray(top_tags)) {
@@ -79,6 +103,9 @@ router.put('/', edit, async (req, res) => {
     if (headline !== undefined) update.headline = String(headline).trim();
     if (subheadline !== undefined) update.subheadline = String(subheadline).trim();
     if (hero_image_url !== undefined) update.hero_image_url = String(hero_image_url).trim();
+    if (background_color !== undefined) update.background_color = String(background_color).trim();
+    if (headline_color !== undefined) update.headline_color = String(headline_color).trim();
+    if (button_color !== undefined) update.button_color = String(button_color).trim();
     if (android_url !== undefined) update.android_url = String(android_url).trim();
     if (ios_url !== undefined) update.ios_url = String(ios_url).trim();
     if (bullets !== undefined) {

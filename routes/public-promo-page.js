@@ -155,6 +155,9 @@ router.get('/:projectCode', async (req, res) => {
             headline: promo.headline,
             subheadline: promo.subheadline,
             hero_image_url: promo.hero_image_url,
+            background_color: promo.background_color || '',
+            headline_color: promo.headline_color || '',
+            button_color: promo.button_color || '',
             bullets: promo.bullets,
             android_url: promo.android_url,
             ios_url: promo.ios_url
