@@ -152,3 +152,6 @@ serviceAccountKey.json
 
 # Migration script output (scripts/migrate_productmaster_to_stores_array.js)
 tmp/
+
+# Database backups taken by reset/maintenance scripts — never commit real customer data
+backups/
