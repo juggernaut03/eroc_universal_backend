@@ -4,6 +4,7 @@ const { requireSuperAdmin } = require('../../middleware/checkPermission');
 const { getTenantDb, DEFAULT_DB_NAME } = require('../../config/database');
 const { getProjectModel } = require('../../models/Project');
 require('../../models/Store');
+const { MOBILE_REGEX, MOBILE_MESSAGE } = require('../../utils/phone');
 
 // Admin accounts always live in the admin-home DB, regardless of which
 // project (tenant) is currently selected in the panel.
@@ -206,10 +207,10 @@ router.post('/admins', async (req, res) => {
   try {
     const { mobile, name, email, password, permissions, allowed_project_codes, allowed_store_codes } = req.body;
 
-    if (!mobile || !/^\d{10}$/.test(String(mobile).trim())) {
+    if (!mobile || !MOBILE_REGEX.test(String(mobile).trim())) {
       return res.status(400).json({
         success: false,
-        message: 'A valid 10-digit mobile number is required'
+        message: MOBILE_MESSAGE
       });
     }
     if (!name || !String(name).trim()) {

@@ -1,6 +1,7 @@
 const axios = require('axios');
 
 const { getSmsConfig } = require('./tenantIntegrations');
+const { toInternational } = require('./phone');
 
 // SMS OTP gateway.
 //
@@ -39,7 +40,7 @@ const requireCredentials = (config) => {
 
 /**
  * Send OTP via SMS Gateway. Uses the provider's generate functionality.
- * @param {string} mobile Mobile number (10 digits)
+ * @param {string} mobile Local mobile number (Indian or Malaysian)
  * @param {object} [project] Tenant project doc; defaults to the current request's tenant
  * @returns {Promise<Object>} Response from gateway
  */
@@ -57,7 +58,7 @@ const sendOtp = async (mobile, project) => {
 
   try {
     // Format mobile with 91 prefix if not present
-    const formattedMobile = mobile.startsWith('91') ? mobile : `91${mobile}`;
+    const formattedMobile = toInternational(mobile);
 
     // Construct message template - note the escaped $otp$ which the provider replaces.
     // The text must match the DLT template registered for SMS_SENDER_ID exactly.
@@ -88,7 +89,7 @@ const sendOtp = async (mobile, project) => {
 
 /**
  * Verify OTP via SMS Gateway.
- * @param {string} mobile Mobile number (10 digits)
+ * @param {string} mobile Local mobile number (Indian or Malaysian)
  * @param {string} otp OTP to verify
  * @param {object} [project] Tenant project doc; defaults to the current request's tenant
  * @returns {Promise<boolean>} True if valid, false otherwise
@@ -111,7 +112,7 @@ const verifyOtp = async (mobile, otp, project) => {
 
   try {
     // Format mobile with 91 prefix
-    const formattedMobile = mobile.startsWith('91') ? mobile : `91${mobile}`;
+    const formattedMobile = toInternational(mobile);
 
     const params = new URLSearchParams();
     params.append('userid', config.userId);

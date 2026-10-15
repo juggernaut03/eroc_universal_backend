@@ -7,6 +7,7 @@ const {
   classifyRefreshToken,
   REFRESH_VERDICT
 } = require('../utils/refreshTokenPolicy');
+const { MOBILE_REGEX, MOBILE_MESSAGE } = require('../utils/phone');
 
 const JWT_SECRET = () => process.env.JWT_SECRET || 'your-secret-key';
 
@@ -162,11 +163,11 @@ const adminLogin = async (req, res) => {
       });
     }
 
-    const mobileRegex = /^[6-9]\d{9}$/;
+    const mobileRegex = MOBILE_REGEX;
     if (!mobileRegex.test(mobile)) {
       return res.status(400).json({
         success: false,
-        message: 'Please enter a valid 10-digit mobile number'
+        message: MOBILE_MESSAGE
       });
     }
 
@@ -277,12 +278,12 @@ const sendOtp = async (req, res) => {
       });
     }
 
-    // Validate mobile number format (10 digits starting with 6-9)
-    const mobileRegex = /^[6-9]\d{9}$/;
+    // Validate mobile number format (Indian or Malaysian, see utils/phone.js)
+    const mobileRegex = MOBILE_REGEX;
     if (!mobileRegex.test(mobile)) {
       return res.status(400).json({
         success: false,
-        message: 'Please enter a valid 10-digit mobile number'
+        message: MOBILE_MESSAGE
       });
     }
 
@@ -337,11 +338,11 @@ const verifyOtp = async (req, res) => {
     }
 
     // Validate mobile number format
-    const mobileRegex = /^[6-9]\d{9}$/;
+    const mobileRegex = MOBILE_REGEX;
     if (!mobileRegex.test(mobile)) {
       return res.status(400).json({
         success: false,
-        message: 'Please enter a valid 10-digit mobile number'
+        message: MOBILE_MESSAGE
       });
     }
 

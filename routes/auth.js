@@ -3,24 +3,21 @@ const { body } = require('express-validator');
 const { sendOtp, verifyOtp, adminLogin, refreshToken, getProfile, updateProfile, logout, isActive, saveFcmToken } = require('../controllers/auth');
 const { protect } = require('../middleware/auth');
 const validate = require('../middleware/validate');
+const { MOBILE_REGEX, MOBILE_MESSAGE } = require('../utils/phone');
 
 const router = express.Router();
 
 // Validation rules
 const sendOtpValidation = [
   body('mobile')
-    .isLength({ min: 10, max: 10 })
-    .withMessage('Mobile number must be exactly 10 digits')
-    .matches(/^[6-9]\d{9}$/)
-    .withMessage('Please enter a valid mobile number starting with 6-9')
+    .matches(MOBILE_REGEX)
+    .withMessage(MOBILE_MESSAGE)
 ];
 
 const verifyOtpValidation = [
   body('mobile')
-    .isLength({ min: 10, max: 10 })
-    .withMessage('Mobile number must be exactly 10 digits')
-    .matches(/^[6-9]\d{9}$/)
-    .withMessage('Please enter a valid mobile number starting with 6-9'),
+    .matches(MOBILE_REGEX)
+    .withMessage(MOBILE_MESSAGE),
   body('otp')
     .isLength({ min: 4, max: 4 })
     .withMessage('OTP must be exactly 4 digits')
@@ -30,10 +27,8 @@ const verifyOtpValidation = [
 
 const adminLoginValidation = [
   body('mobile')
-    .isLength({ min: 10, max: 10 })
-    .withMessage('Mobile number must be exactly 10 digits')
-    .matches(/^[6-9]\d{9}$/)
-    .withMessage('Please enter a valid mobile number starting with 6-9'),
+    .matches(MOBILE_REGEX)
+    .withMessage(MOBILE_MESSAGE),
   body('password')
     .isLength({ min: 1 })
     .withMessage('Password is required')

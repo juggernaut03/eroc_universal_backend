@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { MOBILE_REGEX, MOBILE_MESSAGE } = require('../utils/phone');
 
 const addressSchema = new mongoose.Schema({
   user: {
@@ -52,7 +53,7 @@ const addressSchema = new mongoose.Schema({
   },
   phone: {
     type: String,
-    match: [/^[6-9]\d{9}$/, 'Please enter a valid 10-digit mobile number']
+    match: [MOBILE_REGEX, MOBILE_MESSAGE]
   },
   isDefault: {
     type: Boolean,

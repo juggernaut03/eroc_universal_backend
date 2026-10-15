@@ -1,12 +1,13 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const { MOBILE_REGEX, MOBILE_MESSAGE } = require('../utils/phone');
 
 const userSchema = new mongoose.Schema({
   mobile: {
     type: String,
     required: [true, 'Mobile number is required'],
     unique: true,
-    match: [/^[6-9]\d{9}$/, 'Please enter a valid 10-digit mobile number']
+    match: [MOBILE_REGEX, MOBILE_MESSAGE]
   },
   // Admin-panel credential. Customers keep using OTP and never set this, so
   // it stays optional. Never selected by default — an admin list query must
