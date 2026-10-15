@@ -45,6 +45,14 @@ const requireCredentials = (config) => {
  */
 const sendOtp = async (mobile, project) => {
   const config = getSmsConfig(project);
+
+  // Test mode with no gateway account yet: skip the SMS so the login flow can
+  // reach verifyOtp, where the fixed SMS_TEST_OTP is accepted.
+  if (testOtpEnabled() && (!config.userId || !config.password)) {
+    console.warn(`⚠️  Test OTP mode: no SMS sent to ${mobile} (gateway not configured)`);
+    return { status: 'success', testMode: true };
+  }
+
   requireCredentials(config);
 
   try {
@@ -93,6 +101,12 @@ const verifyOtp = async (mobile, otp, project) => {
   }
 
   const config = getSmsConfig(project);
+
+  // Test mode with no gateway account: only the fixed test OTP can be valid.
+  if (testOtpEnabled() && (!config.userId || !config.password)) {
+    return false;
+  }
+
   requireCredentials(config);
 
   try {
