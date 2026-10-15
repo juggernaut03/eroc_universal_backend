@@ -2,6 +2,7 @@ const express = require('express');
 const router = express.Router();
 const Store = require('../models/Store');
 const Pincode = require('../models/Pincode');
+const { POSTCODE_REGEX, POSTCODE_MESSAGE } = require('../utils/postcode');
 
 /**
  * @route   POST /api/stores/by-pincode
@@ -28,10 +29,10 @@ router.post('/by-pincode', async (req, res, next) => {
     }
 
     // Validate pincode format
-    if (!/^\d{6}$/.test(pincode)) {
+    if (!POSTCODE_REGEX.test(pincode)) {
       return res.status(400).json({
         success: false,
-        error: 'Please provide a valid 6-digit pincode'
+        error: POSTCODE_MESSAGE
       });
     }
 

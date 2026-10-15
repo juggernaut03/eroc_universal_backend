@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { POSTCODE_REGEX, POSTCODE_MESSAGE } = require('../utils/postcode');
 
 const storeSchema = new mongoose.Schema({
   // Legacy: this collection used to hold one row per (store_code, pincode)
@@ -11,7 +12,7 @@ const storeSchema = new mongoose.Schema({
   pincode: {
     type: String,
     trim: true,
-    match: [/^\d{6}$/, 'Please enter a valid 6-digit pincode']
+    match: [POSTCODE_REGEX, POSTCODE_MESSAGE]
   },
   mobile_outlet_name: {
     type: String,

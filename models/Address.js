@@ -1,5 +1,6 @@
 const mongoose = require('mongoose');
 const { MOBILE_REGEX, MOBILE_MESSAGE } = require('../utils/phone');
+const { POSTCODE_REGEX, POSTCODE_MESSAGE } = require('../utils/postcode');
 
 const addressSchema = new mongoose.Schema({
   user: {
@@ -39,7 +40,7 @@ const addressSchema = new mongoose.Schema({
   pincode: {
     type: String,
     required: [true, 'Pincode is required'],
-    match: [/^\d{6}$/, 'Please enter a valid 6-digit pincode']
+    match: [POSTCODE_REGEX, POSTCODE_MESSAGE]
   },
   country: {
     type: String,

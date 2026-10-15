@@ -1,4 +1,5 @@
 const mongoose = require('mongoose');
+const { POSTCODE_REGEX, POSTCODE_MESSAGE } = require('../utils/postcode');
 
 const pincodeSchema = new mongoose.Schema({
   idpincode_master: {
@@ -10,7 +11,7 @@ const pincodeSchema = new mongoose.Schema({
     type: String,
     required: [true, 'Pincode is required'],
     trim: true,
-    match: [/^\d{6}$/, 'Please enter a valid 6-digit pincode']
+    match: [POSTCODE_REGEX, POSTCODE_MESSAGE]
   },
   is_enabled: {
     type: String,
