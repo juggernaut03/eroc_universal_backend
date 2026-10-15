@@ -51,8 +51,10 @@ const sendOtp = async (mobile, project) => {
     // Format mobile with 91 prefix if not present
     const formattedMobile = mobile.startsWith('91') ? mobile : `91${mobile}`;
 
-    // Construct message template - note the escaped $otp$ which the provider replaces
-    const msg = `Dear ${config.clientName} Customer $otp$ is the One Time Password (OTP) for verifying your Mobile number. - Team SHALVI.`;
+    // Construct message template - note the escaped $otp$ which the provider replaces.
+    // The text must match the DLT template registered for SMS_SENDER_ID exactly.
+    const teamName = process.env.SMS_TEAM_NAME || 'JustPress Solutions';
+    const msg = `Dear ${config.clientName} Customer $otp$ is the One Time Password (OTP) for verifying your Mobile number. - Team ${teamName}.`;
 
     const params = new URLSearchParams();
     params.append('userid', config.userId);
