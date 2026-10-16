@@ -12,7 +12,12 @@ try {
 }
 
 const UPLOAD_ROOT = process.env.UPLOAD_ROOT || path.join(__dirname, '..', 'uploads');
-const MEDIA_PUBLIC_URL = (process.env.MEDIA_PUBLIC_URL || 'https://pagariyamart.com/media').replace(/\/$/, '');
+// Public base URL for UPLOAD_ROOT. Must be set in production (nginx serves the
+// folder); without it, links fall back to this API's own /media route.
+const MEDIA_PUBLIC_URL = (
+  process.env.MEDIA_PUBLIC_URL ||
+  `${(process.env.PUBLIC_API_BASE_URL || `http://localhost:${process.env.PORT || 5008}`).replace(/\/$/, '')}/media`
+).replace(/\/$/, '');
 const MAX_IMAGE_WIDTH = parseInt(process.env.MEDIA_MAX_WIDTH || '1600', 10);
 
 const storage = multer.memoryStorage();
